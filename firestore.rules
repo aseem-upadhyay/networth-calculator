@@ -1,0 +1,117 @@
+rules_version = '2';
+
+// Net Worth Calculator — see PLAN.md §5.
+//
+// Load-bearing invariants:
+//   * Snapshots and profiles are owner-only. The admin claim buys nothing here.
+//   * /categories is admin-write-only; users propose, they do not publish.
+//   * /users/{uid}/stats is the ONLY admin-readable per-user data: a bare
+//     number, its currency, its date. No handle, no email, no holdings.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified;
+    }
+
+    // A custom claim, not an /admins document lookup. exists() would cost one
+    // document read per rule evaluation, and the admin console's whole job is
+    // listing many documents — that read would multiply across every row.
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
+    function me() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    // Rules cannot count a collection, but they can assert cross-document state
+    // after a batched write. Forcing every proposal to atomically bump a counter
+    // on the proposer's own profile caps queue-flooding at the database layer.
+    function quotaBumped() {
+      return getAfter(me()).data.categoriesCreated == get(me()).data.categoriesCreated + 1
+          && getAfter(me()).data.categoriesCreated <= 15;
+    }
+
+    function validCategory(id, d) {
+      return id.matches('^[a-z0-9]+(-[a-z0-9]+)*$')
+        && id.size() >= 2 && id.size() <= 40
+        && d.label is string && d.label.size() >= 2 && d.label.size() <= 40
+        && d.kind in ['asset', 'liability']
+        && d.group in ['equity', 'debt', 'cash', 'real-estate',
+                       'commodity', 'alternative', 'liability'];
+    }
+
+    match /users/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+
+      match /snapshots/{snapshotId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /customCategories/{slug} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      // The one admin-readable island.
+      match /stats/{docId} {
+        allow read:  if isSignedIn() && (request.auth.uid == uid || isAdmin());
+        allow write: if isSignedIn() && request.auth.uid == uid;
+      }
+    }
+
+    // Required for the console's aggregates: a nested match alone does NOT
+    // authorize collectionGroup('stats').
+    match /{path=**}/stats/{docId} {
+      allow read: if isAdmin();
+    }
+
+    // Unique display handles. Create-only, so a handle is never reassigned.
+    match /handles/{handle} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn()
+        && handle.matches('^[a-z0-9_]{3,20}$')
+        && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // Global catalog: readable by any signed-in user, ADMIN-WRITE-ONLY.
+    // With no user path in, the abuse surface the quota once guarded is gone.
+    match /categories/{categoryId} {
+      allow read: if isSignedIn();
+      allow create: if isAdmin() && validCategory(categoryId, request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // Proposal queue: anyone may propose, only an admin may rule on it.
+    match /categoryProposals/{categoryId} {
+      allow read: if isAdmin()
+        || (isSignedIn() && resource.data.proposedBy == request.auth.uid);
+
+      allow create: if isSignedIn()
+        && quotaBumped()
+        && validCategory(categoryId, request.resource.data)
+        && request.resource.data.keys().hasOnly(
+             ['label', 'kind', 'group', 'proposedBy', 'proposedByHandle',
+              'proposedAt', 'status'])
+        && request.resource.data.proposedBy == request.auth.uid
+        && request.resource.data.proposedByHandle is string
+        && request.resource.data.proposedAt == request.time
+        && request.resource.data.status == 'pending';
+
+      // Only the verdict may change. This constrains the PRIVILEGED path: an
+      // admin can rule on a proposal but cannot quietly rewrite the label a
+      // user proposed into something else.
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['status', 'reviewedBy', 'reviewedAt', 'rejectionReason'])
+        && request.resource.data.status in ['approved', 'rejected']
+        && request.resource.data.reviewedBy == request.auth.uid
+        && request.resource.data.reviewedAt == request.time;
+
+      allow delete: if false;
+    }
+  }
+}
