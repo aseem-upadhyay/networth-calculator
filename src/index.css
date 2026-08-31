@@ -1,0 +1,207 @@
+/* Design tokens. Light is the base; dark redefines only the values. */
+:root {
+  --bg: #fbfaf8;
+  --surface: #ffffff;
+  --surface-2: #f4f2ee;
+  --border: #e3dfd8;
+  --text: #1c1b19;
+  --text-dim: #6b6862;
+  --accent: #b45309;
+  --accent-soft: #fef3e2;
+  --positive: #15803d;
+  --negative: #b91c1c;
+  --radius: 10px;
+  --shadow: 0 1px 2px rgb(28 27 25 / 6%), 0 4px 12px rgb(28 27 25 / 4%);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161513;
+    --surface: #1f1e1b;
+    --surface-2: #282621;
+    --border: #35322c;
+    --text: #f2efe9;
+    --text-dim: #a39e94;
+    --accent: #f59e0b;
+    --accent-soft: #2e2413;
+    --positive: #4ade80;
+    --negative: #f87171;
+    --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 12px rgb(0 0 0 / 20%);
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Balances are compared column-to-column, so they need tabular figures. */
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.app { max-width: 1080px; margin: 0 auto; padding: 32px 20px 80px; }
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px 22px;
+}
+
+h1 { font-size: 22px; letter-spacing: -0.015em; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 12px; font-weight: 600; }
+p  { margin: 0 0 10px; }
+code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+a { color: var(--accent); }
+
+.dim { color: var(--text-dim); }
+.small { font-size: 13px; }
+
+.checklist { list-style: none; margin: 0; padding: 0; }
+.checklist li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+}
+.checklist li:last-child { border-bottom: 0; }
+.checklist .mark { flex: none; width: 1.1em; }
+.ok  { color: var(--positive); }
+.todo { color: var(--text-dim); }
+
+/* ---------- controls ---------- */
+button {
+  font: inherit;
+  cursor: pointer;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  padding: 9px 16px;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+button:hover:not(:disabled) { background: var(--surface-2); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 550;
+}
+.btn-primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+
+input, select {
+  font: inherit;
+  width: 100%;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: 13px; font-weight: 550; margin-bottom: 5px; }
+.field .hint { font-size: 12px; color: var(--text-dim); margin-top: 5px; }
+.field .error { font-size: 12px; color: var(--negative); margin-top: 5px; }
+
+.prefix { display: flex; align-items: center; gap: 0; }
+.prefix .sigil {
+  padding: 9px 4px 9px 11px;
+  border: 1px solid var(--border);
+  border-right: 0;
+  border-radius: 8px 0 0 8px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+.prefix input { border-radius: 0 8px 8px 0; }
+
+.centered { min-height: 100dvh; display: grid; place-items: center; padding: 24px; }
+.panel { width: 100%; max-width: 420px; }
+.row { display: flex; gap: 12px; }
+.row > * { flex: 1; }
+.spread { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.stack-sm > * + * { margin-top: 8px; }
+
+/* ---------- charts ---------- */
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; padding: 5px 12px; font-size: 13px; background: var(--surface); }
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 550; }
+
+.legend { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.legend-row { display: flex; align-items: center; gap: 9px; padding: 4px 0; font-size: 13px; }
+/* 2px surface ring, matching the gap between the arcs it identifies. */
+.swatch {
+  width: 11px; height: 11px; border-radius: 3px; flex: none;
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.bars { display: flex; flex-direction: column; gap: 3px; }
+.bar-row { display: grid; grid-template-columns: minmax(120px, 1.4fr) 3fr auto 52px; gap: 10px; align-items: center; font-size: 13px; }
+.bar-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { background: var(--surface-2); border-radius: 4px; height: 16px; overflow: hidden; }
+/* 4px rounded data-end, anchored to the baseline. */
+.bar-fill { display: block; height: 100%; border-radius: 0 4px 4px 0; }
+.bar-value { text-align: right; }
+.bar-share { text-align: right; }
+
+.chart-scroll { overflow-x: auto; }
+
+table.data { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.data th, table.data td { padding: 7px 10px; text-align: right; white-space: nowrap; }
+table.data th:first-child, table.data td:first-child { text-align: left; }
+table.data thead th { font-weight: 550; color: var(--text-dim); border-bottom: 1px solid var(--border); }
+table.data tbody tr + tr td { border-top: 1px solid var(--border); }
+table.data td.pos { color: var(--positive); }
+table.data td.neg { color: var(--negative); }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; vertical-align: baseline; }
+
+@media (max-width: 720px) {
+  .bar-row { grid-template-columns: minmax(90px, 1fr) 2fr auto; }
+  .bar-share { display: none; }
+}
+
+/* ---------- privacy blur ----------
+   Shoulder-surfing is the one exposure no storage choice addresses. Blur only
+   the figures; labels and structure stay readable so the page is still usable. */
+body.redacted .num,
+body.redacted .bar-fill {
+  filter: blur(7px);
+  user-select: none;
+}
+body.redacted .bar-fill { filter: blur(3px); }
+
+.banner {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+.toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

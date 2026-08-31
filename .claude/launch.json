@@ -1,0 +1,15 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dev",
+      "//": "This machine's default node is v10, which cannot run Vite. Load nvm and honour .nvmrc.",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": [
+        "-lc",
+        "source \"$NVM_DIR/nvm.sh\" 2>/dev/null || source \"$HOME/.nvm/nvm.sh\"; nvm use >/dev/null; exec npm run dev"
+      ],
+      "port": 5173
+    }
+  ]
+}
