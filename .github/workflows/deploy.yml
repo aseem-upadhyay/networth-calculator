@@ -19,6 +19,12 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # The VITE_* values live as *environment* secrets on `prod`, and an
+    # environment secret is invisible to any job that does not declare that
+    # environment — the interpolation silently resolves to an empty string
+    # rather than failing, so the build would succeed and ship a bundle with
+    # no Firebase config.
+    environment: prod
     steps:
       - uses: actions/checkout@v4
 
