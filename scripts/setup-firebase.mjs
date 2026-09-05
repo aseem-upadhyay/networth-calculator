@@ -202,8 +202,34 @@ async function reject(slug) {
   console.log("The proposer keeps their private copy — rejection is not deletion.")
 }
 
+/**
+ * Per-account detail. Written to verify that "delete my account" actually
+ * deletes: run it before and after, and every document below should be gone.
+ */
+async function inspect() {
+  const { users } = await auth.listUsers(1000)
+  console.log(`auth accounts: ${users.length}`)
+  for (const u of users) {
+    const [snaps, customs, stats, prof] = await Promise.all([
+      db.collection(`users/${u.uid}/snapshots`).get(),
+      db.collection(`users/${u.uid}/customCategories`).get(),
+      db.doc(`users/${u.uid}/stats/current`).get(),
+      db.doc(`users/${u.uid}`).get(),
+    ])
+    console.log(`  ${u.email}  (${u.uid})`)
+    console.log(
+      `    profile=${prof.exists} handle=${prof.data()?.handle ?? '-'} ` +
+        `snapshots=${snaps.size} custom=${customs.size} stats=${stats.exists}`,
+    )
+  }
+  const handles = await db.collection('handles').get()
+  console.log('handles      :', handles.docs.map((d) => d.id).join(', ') || '(none)')
+  const props = await db.collection('categoryProposals').get()
+  console.log('proposals    :', props.docs.map((d) => `${d.id}:${d.data().status}`).join(', ') || '(none)')
+}
+
 const [cmd, arg] = process.argv.slice(2)
-const commands = { seed, admin, status, proposals, approve, reject }
+const commands = { seed, admin, status, proposals, approve, reject, inspect }
 
 if (!commands[cmd]) {
   console.error(
@@ -211,6 +237,7 @@ if (!commands[cmd]) {
       '  seed                    write the starter category catalog\n' +
       '  admin <email>           grant the admin custom claim\n' +
       '  status                  counts of categories, proposals, accounts, admins\n' +
+      '  inspect                 per-account documents, for verifying deletion\n' +
       '  proposals               list every proposal and its verdict\n' +
       '  approve <slug>          publish a proposal to the global catalog\n' +
       '  reject <slug> [reason]  record a rejection\n',

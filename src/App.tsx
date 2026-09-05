@@ -7,6 +7,7 @@ import SignIn from './views/SignIn'
 import Onboarding from './views/Onboarding'
 import Setup from './views/Setup'
 import SnapshotEditor from './views/SnapshotEditor'
+import Footer from './components/Footer'
 // Recharts is ~150 kB gzipped and renders only once a snapshot exists, so it
 // stays out of the sign-in path entirely.
 const Breakup = lazy(() => import('./components/Breakup'))
@@ -17,11 +18,14 @@ const DeltaTable = lazy(() => import('./components/DeltaTable'))
 // a bare `lazy(() => import(...))` at module scope still emits the chunk even
 // when nothing reaches it, because the dynamic import is not inside the branch
 // that import.meta.env.DEV constant-folds away.
-const ChartPreview = import.meta.env.DEV ? lazy(() => import('./dev/ChartPreview')) : null
+// Ships in production: the whole point is a link that can be handed to someone.
+const DemoApp = lazy(() => import('./demo/DemoApp'))
 const Admin = lazy(() => import('./views/Admin'))
+const DeleteAccount = lazy(() => import('./views/DeleteAccount'))
 import { useAdmin } from './hooks/useAdmin'
 import { useRedacted } from './hooks/useRedacted'
 import { buildBackup, downloadBackup, monthsUntilDue } from './lib/export'
+import { addCustomCategory, saveSnapshot } from './lib/repo'
 import type { Snapshot } from './lib/types'
 
 function ago(ms: number): string {
@@ -36,12 +40,14 @@ type View =
   | { name: 'dashboard' }
   | { name: 'editor'; editing?: Snapshot }
   | { name: 'admin' }
+  | { name: 'delete' }
 
 export default function App() {
   const { session, setSession, refresh, refreshing } = useSession()
   const [view, setView] = useState<View>({ name: 'dashboard' })
   const [currencies, setCurrencies] = useState<Record<string, string>>({})
   const [redacted, toggleRedacted] = useRedacted()
+  const [demo] = useState(() => new URLSearchParams(location.search).has('demo'))
   const isAdmin = useAdmin(session.status === 'ready' ? session.user : null)
 
   useEffect(() => {
@@ -49,8 +55,15 @@ export default function App() {
     void fetchCurrencies().then(setCurrencies)
   }, [])
 
-  if (ChartPreview && new URLSearchParams(location.search).has('charts')) {
-    return <Suspense fallback={null}><ChartPreview /></Suspense>
+  // ?demo runs entirely in memory and touches no backend, so it is checked
+  // before the auth state machine — it works even in a build with no Firebase
+  // credentials at all.
+  if (demo) {
+    return (
+      <Suspense fallback={<div className="centered"><p className="dim">Loading demo…</p></div>}>
+        <DemoApp onExit={() => { location.search = '' }} />
+      </Suspense>
+    )
   }
 
   switch (session.status) {
@@ -103,15 +116,31 @@ export default function App() {
         )
       }
 
+      if (view.name === 'delete') {
+        return (
+          <Suspense fallback={<div className="centered"><p className="dim">Loading…</p></div>}>
+            <DeleteAccount
+              user={user} profile={profile} snapshots={snapshots} categories={categories}
+              onCancel={() => setView({ name: 'dashboard' })}
+            />
+          </Suspense>
+        )
+      }
+
       if (view.name === 'editor') {
         return (
           <SnapshotEditor
-            uid={user.uid}
             profile={profile}
             snapshots={snapshots}
             categories={categories}
             currencies={currencies}
             editing={view.editing}
+            persistence={{
+              saveSnapshot: (draft, cats) => saveSnapshot(user.uid, draft, cats, snapshots),
+              createCategory: async (c) => (await addCustomCategory(user.uid, {
+                ...c, handle: profile.handle, categoriesCreated: profile.categoriesCreated,
+              })).category,
+            }}
             onCancel={() => setView({ name: 'dashboard' })}
             onSaved={(data) => {
               setSession({ ...session, ...data, fetchedAt: Date.now() })
@@ -227,6 +256,13 @@ export default function App() {
               Export JSON
             </button>
             {isAdmin && <button onClick={() => setView({ name: 'admin' })}>Admin</button>}
+            <button
+              onClick={() => setView({ name: 'delete' })}
+              style={{ color: 'var(--negative)' }}
+              title="Permanently delete your account and every snapshot"
+            >
+              Delete account
+            </button>
             <span className="dim small" style={{ marginLeft: 'auto' }}>
               {user.email} ·{' '}
               <button
@@ -237,6 +273,8 @@ export default function App() {
               </button>
             </span>
           </div>
+
+          <Footer />
         </div>
       )
     }

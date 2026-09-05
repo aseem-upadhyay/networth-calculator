@@ -205,3 +205,20 @@ body.redacted .bar-fill { filter: blur(3px); }
   font-size: 14px;
 }
 .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* ---------- demo ---------- */
+.demo-bar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 9px 20px;
+  font-size: 13px;
+  background: var(--accent-soft);
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.demo-bar button { padding: 4px 12px; font-size: 13px; }
