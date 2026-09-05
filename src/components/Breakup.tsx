@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react'
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip } from 'recharts'
-import { convertToBase, formatMoney } from '../lib/money'
+import { convertBetween, formatMoney } from '../lib/money'
 import { GROUP_LABEL, GROUP_ORDER, groupColor, surface } from '../lib/palette'
 import { useDarkMode } from '../hooks/useDarkMode'
+import Money from './Money'
 import type { Category, CategoryGroup, Snapshot } from '../lib/types'
 
 interface Slice {
@@ -26,14 +27,16 @@ interface Slice {
  * meaningless, so they get their own block.
  */
 export default function Breakup({
-  snapshot, categories,
+  snapshot, categories, displayCurrency,
 }: {
   snapshot: Snapshot
   categories: Category[]
+  /** Report in this currency; the snapshot's own frozen rates do the conversion. */
+  displayCurrency?: string
 }) {
   const dark = useDarkMode()
   const [byCategory, setByCategory] = useState(false)
-  const base = snapshot.baseCurrency
+  const base = displayCurrency ?? snapshot.baseCurrency
   const bg = surface(dark)
 
   const { groups, cats, liabilities, assetTotal, liabilityTotal } = useMemo(() => {
@@ -44,7 +47,9 @@ export default function Breakup({
 
     for (const h of snapshot.holdings) {
       const meta = byId.get(h.categoryId)
-      const value = convertToBase(h.amount, h.currency, snapshot.fxRates, base)
+      const value = convertBetween(
+        h.amount, h.currency, base, snapshot.fxRates, snapshot.baseCurrency,
+      )
       const group = meta?.group ?? 'alternative'
       const row: Slice = {
         key: h.categoryId, label: meta?.label ?? h.categoryId, group, value, share: 0,
@@ -92,11 +97,11 @@ export default function Breakup({
         </div>
       </div>
       <p className="dim small" style={{ marginTop: 0 }}>
-        Assets as of {snapshot.asOfDate} · {formatMoney(assetTotal, base)}
+        Assets as of {snapshot.asOfDate} · <Money amount={assetTotal} currency={base} />
       </p>
 
       {!byCategory ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,240px) 1fr', gap: 20, alignItems: 'center' }}>
+        <div className="chart-split">
           <div style={{ height: 240, minWidth: 0 }}>
             <ResponsiveContainer>
               <PieChart>

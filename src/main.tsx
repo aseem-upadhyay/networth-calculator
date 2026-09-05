@@ -1,14 +1,17 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import App from './App'
+import Root, { IS_DEMO } from './Root'
 import './index.css'
-import { initAppCheck } from './lib/firebase'
 
-// Fire and forget: App Check must not delay first paint.
-void initAppCheck()
+// Imported dynamically, and never on the demo route. A static import here pulled
+// the whole Firebase SDK into the entry chunk, so every visitor downloaded ~160 kB
+// gzipped before deciding whether they even needed a backend.
+if (!IS_DEMO) {
+  void import('./lib/firebase').then((m) => m.initAppCheck())
+}
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <Root />
   </StrictMode>,
 )

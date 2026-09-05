@@ -123,7 +123,7 @@ export default function Admin({ user, onBack }: { user: User; onBack: () => void
                 {p.kind} · {p.group} · by @{p.proposedByHandle}
               </div>
             </div>
-            <div className="row" style={{ flex: '0 0 auto' }}>
+            <div className="row actions">
               <button onClick={() => void act(p, false)} disabled={busy === p.id}>Reject</button>
               <button className="btn-primary" onClick={() => void act(p, true)} disabled={busy === p.id}>
                 Approve

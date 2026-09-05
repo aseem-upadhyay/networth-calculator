@@ -1,4 +1,4 @@
-import type { Category, Profile, Snapshot } from './types'
+import type { Category, Portfolio, Profile, Snapshot } from './types'
 
 /**
  * Read cache, split by sensitivity rather than convenience (PLAN.md §6).
@@ -10,7 +10,11 @@ import type { Category, Profile, Snapshot } from './types'
  * it never attempts a merge. At a 6-12 month update cadence you will not
  * remember the old shape, and a half-migrated cache is worse than a cold start.
  */
-export const SCHEMA = 1
+// 2: snapshots moved under portfolios, profile.baseCurrency -> displayCurrency.
+// A version bump discards and refetches rather than merging — at a 6-12 month
+// cadence nobody remembers the old shape, and a half-migrated cache is worse
+// than a cold start.
+export const SCHEMA = 2
 
 const privKey = (uid: string) => `nwc:v${SCHEMA}:${uid}`
 const CATS_KEY = `nwc:v${SCHEMA}:categories`
@@ -21,7 +25,9 @@ export interface PrivateCache {
   /** Client clock, for the "as of" label next to the Refresh button. */
   fetchedAt: number
   profile: Profile
-  snapshots: Snapshot[]
+  portfolios: Portfolio[]
+  /** portfolioId -> that folio's own timeline, ordered by asOfDate. */
+  snapshots: Record<string, Snapshot[]>
 }
 
 /**
@@ -54,7 +60,7 @@ export function readPrivateCache(uid: string): PrivateCache | null {
 
 export function writePrivateCache(
   uid: string,
-  data: { profile: Profile; snapshots: Snapshot[] },
+  data: { profile: Profile; portfolios: Portfolio[]; snapshots: Record<string, Snapshot[]> },
 ): PrivateCache {
   const payload: PrivateCache = {
     schemaVersion: SCHEMA, uid, fetchedAt: Date.now(), ...data,
@@ -63,13 +69,32 @@ export function writePrivateCache(
   return payload
 }
 
-export function readCategories(): Category[] | null {
-  const c = safeRead<{ schemaVersion: number; categories: Category[] }>(localStorage, CATS_KEY)
-  return c?.schemaVersion === SCHEMA ? c.categories : null
+/**
+ * The catalog is identical for every user and changes perhaps monthly, so it is
+ * cached across sessions rather than re-fetched each time. A day is short enough
+ * that an approved category shows up promptly and long enough that most sessions
+ * pay nothing for it; the Refresh button bypasses this entirely.
+ */
+const CATALOG_TTL_MS = 24 * 60 * 60 * 1000
+
+interface CachedCatalog {
+  schemaVersion: number
+  fetchedAt: number
+  version: number
+  categories: Category[]
 }
 
-export function writeCategories(categories: Category[]): void {
-  safeWrite(localStorage, CATS_KEY, { schemaVersion: SCHEMA, categories })
+export function readCategories(opts: { ignoreTtl?: boolean } = {}): Category[] | null {
+  const c = safeRead<CachedCatalog>(localStorage, CATS_KEY)
+  if (!c || c.schemaVersion !== SCHEMA) return null
+  if (!opts.ignoreTtl && Date.now() - c.fetchedAt > CATALOG_TTL_MS) return null
+  return c.categories
+}
+
+export function writeCategories(categories: Category[], version = 0): void {
+  safeWrite(localStorage, CATS_KEY, {
+    schemaVersion: SCHEMA, fetchedAt: Date.now(), version, categories,
+  })
 }
 
 /**

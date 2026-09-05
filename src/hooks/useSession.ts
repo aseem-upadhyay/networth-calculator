@@ -3,12 +3,14 @@ import { onAuthStateChanged, type User } from 'firebase/auth'
 import { getAuthClient, isConfigured, readyAuth } from '../lib/firebase'
 import { readCategories, readPrivateCache } from '../lib/cache'
 import { hardRefresh } from '../lib/repo'
-import type { Category, Profile, Snapshot } from '../lib/types'
+import type { Category, Portfolio, Profile, Snapshot } from '../lib/types'
 
 export interface SessionData {
   user: User
   profile: Profile
-  snapshots: Snapshot[]
+  portfolios: Portfolio[]
+  /** portfolioId -> that folio's own timeline. */
+  snapshots: Record<string, Snapshot[]>
   categories: Category[]
   /** When the cached copy was fetched, for the age label beside Refresh. */
   fetchedAt: number
@@ -44,12 +46,17 @@ export function useSession() {
     }
 
     try {
-      const { profile, snapshots, categories } = await hardRefresh(user.uid)
+      // A manual Refresh bypasses every cache, including the catalog's.
+      const { profile, portfolios, snapshots, categories } =
+        await hardRefresh(user.uid, { force: !preferCache })
       if (!profile) {
         setSession({ status: 'onboarding', user })
         return
       }
-      setSession({ status: 'ready', user, profile, snapshots, categories, fetchedAt: Date.now() })
+      setSession({
+        status: 'ready', user, profile, portfolios, snapshots, categories,
+        fetchedAt: Date.now(),
+      })
     } catch (e) {
       setSession({ status: 'error', message: (e as Error).message })
     }

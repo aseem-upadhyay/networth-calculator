@@ -27,6 +27,12 @@ export interface Category {
   label: string
   kind: CategoryKind
   group: CategoryGroup
+  /**
+   * Where this instrument exists. `GLOBAL` for things that exist everywhere
+   * (cash, real estate, gold); otherwise ISO country codes — EPF is `['IN']`,
+   * RRSP is `['CA']`. Used to order the picker, never to restrict it.
+   */
+  regions: string[]
   /** Where this came from. Global wins ties when the two tiers are unioned. */
   tier: 'global' | 'custom'
 }
@@ -67,11 +73,34 @@ export interface Snapshot {
   totals: Totals
 }
 
+/**
+ * A set of holdings with its own timeline.
+ *
+ * `region` is optional and only *biases* the category picker — it does not
+ * restrict it. A portfolio is free-form: "India" and "Retirement" and "Zerodha"
+ * are all valid ways to divide holdings, and someone in Mumbai may well hold a
+ * 401(k) from a previous job.
+ */
+export interface Portfolio {
+  id: string
+  label: string
+  /** ISO 3166 alpha-2, or null for a folio that is not country-shaped. */
+  region: string | null
+  /** The currency this folio is naturally kept in; stamps its new snapshots. */
+  baseCurrency: string
+  cadenceMonths: 6 | 12
+  order: number
+}
+
 export interface Profile {
   handle: string
   email: string
-  baseCurrency: string
-  cadenceMonths: 6 | 12
+  /**
+   * What the user is currently *looking at* — distinct from what a portfolio is
+   * *kept in* (`Portfolio.baseCurrency`). One field answered both questions
+   * badly; portfolios make the conflation untenable.
+   */
+  displayCurrency: string
   categoriesCreated: number
   schemaVersion: number
 }

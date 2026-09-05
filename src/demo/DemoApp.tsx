@@ -1,19 +1,24 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import { computeTotals, kindLookup } from '../lib/calc'
+import { availableDisplayCurrencies, combineTotals, computeTotals, kindLookup } from '../lib/calc'
 import { slugify } from '../lib/cache'
-import { fetchCurrencies } from '../lib/fx'
-import { formatMoney } from '../lib/money'
+import { fetchCurrencies, guessCurrency, orderCurrencies } from '../lib/fx'
 import type { SnapshotDraft } from '../lib/repo'
 import SnapshotEditor from '../views/SnapshotEditor'
 import Footer from '../components/Footer'
-import { DEMO_CATEGORIES, DEMO_PROFILE, DEMO_SNAPSHOTS } from './demoData'
+import {
+  DEMO_CATEGORIES, DEMO_PORTFOLIO, DEMO_PORTFOLIO_US, DEMO_SNAPSHOTS, DEMO_SNAPSHOTS_US,
+} from './demoData'
+import PortfolioCard from '../components/PortfolioCard'
+import Money from '../components/Money'
 import type { Category, Snapshot } from '../lib/types'
 
-const Breakup = lazy(() => import('../components/Breakup'))
-const Growth = lazy(() => import('../components/Growth'))
-const DeltaTable = lazy(() => import('../components/DeltaTable'))
+const CombinedSummary = lazy(() => import('../components/CombinedSummary'))
+const PortfolioView = lazy(() => import('../views/PortfolioView'))
 
-type View = { name: 'dashboard' } | { name: 'editor'; editing?: Snapshot }
+type View =
+  | { name: 'dashboard' }
+  | { name: 'portfolio'; id: string }
+  | { name: 'editor'; portfolioId: string; editing?: Snapshot }
 
 /**
  * A fully interactive demo with no sign-in and no persistence.
@@ -28,126 +33,164 @@ type View = { name: 'dashboard' } | { name: 'editor'; editing?: Snapshot }
  * putting real balances on a screen in front of other people.
  */
 export default function DemoApp({ onExit }: { onExit: () => void }) {
-  const [snapshots, setSnapshots] = useState<Snapshot[]>(DEMO_SNAPSHOTS)
+  const portfolios = [DEMO_PORTFOLIO, DEMO_PORTFOLIO_US]
+  const [timelines, setTimelines] = useState<Record<string, Snapshot[]>>({
+    [DEMO_PORTFOLIO.id]: DEMO_SNAPSHOTS,
+    [DEMO_PORTFOLIO_US.id]: DEMO_SNAPSHOTS_US,
+  })
   const [categories, setCategories] = useState<Category[]>(DEMO_CATEGORIES)
   const [view, setView] = useState<View>({ name: 'dashboard' })
   const [currencies, setCurrencies] = useState<Record<string, string>>({})
   const [dirty, setDirty] = useState(false)
+  const [preferred, setDisplay] = useState(guessCurrency('INR'))
 
   useEffect(() => { void fetchCurrencies().then(setCurrencies) }, [])
 
-  const latest = snapshots.at(-1)
-
-  const persistence = useMemo(() => ({
-    // Same shape the Firestore-backed version returns, so the editor cannot
-    // tell the difference — it just never leaves memory.
-    saveSnapshot: async (draft: SnapshotDraft, cats: Category[]) => {
-      const totals = computeTotals(
-        draft.holdings, kindLookup(cats), draft.fxRates, draft.baseCurrency,
-      )
-      const saved: Snapshot = {
-        ...draft, totals, recordedAt: Date.now(), updatedAt: Date.now(),
-      }
-      const next = [...snapshots.filter((s) => s.asOfDate !== draft.asOfDate), saved]
-        .sort((a, b) => a.asOfDate.localeCompare(b.asOfDate))
-      setSnapshots(next)
-      setCategories(cats)
-      setDirty(true)
-      return { snapshots: next, categories: cats }
-    },
-    createCategory: async (c: { slug: string; label: string; kind: Category['kind']; group: Category['group'] }) => {
-      const category: Category = {
-        id: c.slug || slugify(c.label), label: c.label, kind: c.kind, group: c.group, tier: 'custom',
-      }
-      setCategories((cs) => [...cs, category].sort((a, b) => a.label.localeCompare(b.label)))
-      setDirty(true)
-      return category
-    },
-  }), [snapshots])
-
-  if (view.name === 'editor') {
-    return (
-      <>
-        <DemoBanner dirty={dirty} onReset={reset} onExit={onExit} />
-        <SnapshotEditor
-          profile={DEMO_PROFILE}
-          snapshots={snapshots}
-          categories={categories}
-          currencies={currencies}
-          editing={view.editing}
-          persistence={persistence}
-          onSaved={({ snapshots: s, categories: c }) => {
-            setSnapshots(s); setCategories(c); setView({ name: 'dashboard' })
-          }}
-          onCancel={() => setView({ name: 'dashboard' })}
-        />
-      </>
-    )
-  }
+  const allSnapshots = useMemo(() => Object.values(timelines).flat(), [timelines])
+  const reachable = useMemo(() => availableDisplayCurrencies(allSnapshots), [allSnapshots])
+  const display = reachable.includes(preferred) ? preferred : (reachable[0] ?? preferred)
+  const kinds = useMemo(() => kindLookup(categories), [categories])
+  const combined = combineTotals(portfolios, timelines, kinds, display)
 
   function reset() {
-    setSnapshots(DEMO_SNAPSHOTS)
+    setTimelines({
+      [DEMO_PORTFOLIO.id]: DEMO_SNAPSHOTS,
+      [DEMO_PORTFOLIO_US.id]: DEMO_SNAPSHOTS_US,
+    })
     setCategories(DEMO_CATEGORIES)
     setDirty(false)
     setView({ name: 'dashboard' })
   }
 
+  const persistenceFor = (portfolioId: string) => ({
+    // Same shape the Firestore-backed version returns, so the editor cannot tell
+    // the difference — it just never leaves memory.
+    saveSnapshot: async (draft: SnapshotDraft, cats: Category[]) => {
+      const totals = computeTotals(
+        draft.holdings, kindLookup(cats), draft.fxRates, draft.baseCurrency,
+      )
+      const saved: Snapshot = { ...draft, totals, recordedAt: Date.now(), updatedAt: Date.now() }
+      const next = [...(timelines[portfolioId] ?? []).filter((s) => s.asOfDate !== draft.asOfDate), saved]
+        .sort((a, b) => a.asOfDate.localeCompare(b.asOfDate))
+      setTimelines((t) => ({ ...t, [portfolioId]: next }))
+      setCategories(cats)
+      setDirty(true)
+      return { snapshots: next, categories: cats }
+    },
+    createCategory: async (c: {
+      slug: string; label: string; kind: Category['kind']
+      group: Category['group']; regions: string[]
+    }) => {
+      const category: Category = {
+        id: c.slug || slugify(c.label), label: c.label, kind: c.kind, group: c.group,
+        regions: c.regions, tier: 'custom',
+      }
+      setCategories((cs) => [...cs, category].sort((a, b) => a.label.localeCompare(b.label)))
+      setDirty(true)
+      return category
+    },
+  })
+
+  const bar = <DemoBanner dirty={dirty} onReset={reset} onExit={onExit} />
+
+  if (view.name === 'editor') {
+    const p = portfolios.find((x) => x.id === view.portfolioId)!
+    return (
+      <>
+        {bar}
+        <SnapshotEditor
+          portfolio={p}
+          snapshots={timelines[p.id] ?? []}
+          categories={categories}
+          currencies={currencies}
+          editing={view.editing}
+          persistence={persistenceFor(p.id)}
+          onSaved={() => setView({ name: 'portfolio', id: p.id })}
+          onCancel={() => setView({ name: 'portfolio', id: p.id })}
+        />
+      </>
+    )
+  }
+
+  if (view.name === 'portfolio') {
+    const p = portfolios.find((x) => x.id === view.id)!
+    return (
+      <>
+        {bar}
+        <Suspense fallback={<div className="centered"><p className="dim">Loading…</p></div>}>
+          <PortfolioView
+            portfolio={p} timeline={timelines[p.id] ?? []} categories={categories}
+            displayCurrency={display}
+            onBack={() => setView({ name: 'dashboard' })}
+            onEdit={(s) => setView({ name: 'editor', portfolioId: p.id, editing: s })}
+            onNew={() => setView({ name: 'editor', portfolioId: p.id })}
+          />
+        </Suspense>
+      </>
+    )
+  }
+
   return (
     <>
-      <DemoBanner dirty={dirty} onReset={reset} onExit={onExit} />
+      {bar}
       <div className="app">
         <header className="spread" style={{ marginBottom: 24 }}>
           <div>
             <h1>Net Worth Calculator</h1>
-            <p className="dim small" style={{ margin: 0 }}>
-              @demo · reporting in INR · {categories.length} categories
+            <p className="dim small toolbar" style={{ margin: 0 }}>
+              <span>@demo · showing</span>
+              <select
+                value={display}
+                aria-label="Display currency"
+                style={{ width: 'auto', padding: '2px 6px', fontSize: 13 }}
+                onChange={(e) => setDisplay(e.target.value)}
+              >
+                {orderCurrencies(currencies, display)
+                  .filter((c) => reachable.includes(c.code))
+                  .map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}
+              </select>
             </p>
           </div>
-          <button className="btn-primary" onClick={() => setView({ name: 'editor' })}>
-            New snapshot
-          </button>
         </header>
 
-        {latest && (
-          <div className="card" style={{ marginBottom: 16 }}>
-            <h2>Net worth</h2>
-            <p className="num" style={{ fontSize: 32, margin: '0 0 4px' }}>
-              {formatMoney(latest.totals.net || 0, latest.baseCurrency)}
+        <div className="card" style={{ marginBottom: 16 }}>
+          <h2>Net worth</h2>
+          <p className="num" style={{ fontSize: 32, margin: '0 0 4px' }}>
+            <Money amount={combined.net} currency={display} />
+          </p>
+          <p className="dim small" style={{ margin: 0 }}>
+            assets <Money amount={combined.assets} currency={display} /> ·
+            liabilities <Money amount={combined.liabilities} currency={display} />
+          </p>
+          {combined.blended && (
+            <p className="dim small" style={{ margin: '8px 0 0' }}>
+              Blended:{' '}
+              {portfolios
+                .filter((p) => combined.provenance[p.id])
+                .map((p) => `${p.label} as of ${combined.provenance[p.id]}`)
+                .join(' · ')}
             </p>
-            <p className="dim small" style={{ margin: 0 }}>
-              as of {latest.asOfDate} · {latest.holdings.length} holdings
-            </p>
+          )}
+        </div>
+
+        <Suspense fallback={<div className="card dim small">Loading…</div>}>
+          <div style={{ marginBottom: 16 }}>
+            <CombinedSummary
+              portfolios={portfolios} timelines={timelines}
+              categories={categories} displayCurrency={display}
+            />
           </div>
-        )}
+        </Suspense>
 
-        {latest && (
-          <Suspense fallback={<div className="card dim small">Loading charts…</div>}>
-            <div style={{ display: 'grid', gap: 16, marginBottom: 16 }}>
-              <Breakup snapshot={latest} categories={categories} />
-              <Growth snapshots={snapshots} categories={categories} />
-              <DeltaTable snapshots={snapshots} categories={categories} />
-            </div>
-          </Suspense>
-        )}
-
-        <div className="card">
-          <h2>History</h2>
-          <ul className="checklist">
-            {[...snapshots].reverse().map((s) => (
-              <li key={s.asOfDate}>
-                <span style={{ flex: 1 }}>
-                  <strong>{s.asOfDate}</strong>
-                  {s.note && <span className="dim"> · {s.note}</span>}
-                </span>
-                <button
-                  onClick={() => setView({ name: 'editor', editing: s })}
-                  style={{ padding: '2px 10px', fontSize: 13 }}
-                >
-                  Edit
-                </button>
-              </li>
-            ))}
-          </ul>
+        <div className="grid-cards">
+          {portfolios.map((p) => (
+            <PortfolioCard
+              key={p.id} portfolio={p} timeline={timelines[p.id] ?? []}
+              kinds={kinds} displayCurrency={display}
+              onOpen={() => setView({ name: 'portfolio', id: p.id })}
+              onUpdate={() => setView({ name: 'editor', portfolioId: p.id })}
+            />
+          ))}
         </div>
 
         <Footer />

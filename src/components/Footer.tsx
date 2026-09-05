@@ -4,8 +4,8 @@ export default function Footer() {
   return (
     <footer className="dim small" style={{ marginTop: 32, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
       <p style={{ margin: '0 0 6px' }}>
-        Built by <a href={AUTHOR_URL} target="_blank" rel="noreferrer noopener">{AUTHOR}</a>,
-        originally just to track my own net worth.{' '}
+        Built by <a href={AUTHOR_URL} target="_blank" rel="noreferrer noopener">{AUTHOR}</a> to
+        track my own net worth, now open to anyone who wants the same.{' '}
         <a href={REPO_URL} target="_blank" rel="noreferrer noopener">Source</a> is public —
         including the{' '}
         <a href={RULES_URL} target="_blank" rel="noreferrer noopener">database rules</a> that stop

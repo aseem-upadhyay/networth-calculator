@@ -87,7 +87,23 @@ export function cachedRates(base: string): RateResult | null {
  * Currency code -> name for the picker. Falls back through localStorage to the
  * hardcoded table, so this never rejects and never returns an empty list.
  */
-export async function fetchCurrencies(): Promise<Record<string, string>> {
+let currenciesInFlight: Promise<Record<string, string>> | null = null
+
+/**
+ * The currency list is immutable for a session and several components want it,
+ * so the first call is shared with every later one. Without this, React's
+ * StrictMode double-invoke plus two mounted consumers made four requests for
+ * one unchanging list.
+ *
+ * Safe to cache the promise because this never rejects — failure resolves to
+ * the localStorage copy or the hardcoded table.
+ */
+export function fetchCurrencies(): Promise<Record<string, string>> {
+  currenciesInFlight ??= loadCurrencies()
+  return currenciesInFlight
+}
+
+async function loadCurrencies(): Promise<Record<string, string>> {
   try {
     const res = await fetch(`${API}/currencies`)
     if (!res.ok) throw new Error(String(res.status))
@@ -123,4 +139,39 @@ export function orderCurrencies(
   legacy.forEach(push)
   Object.keys(available).sort().forEach(push)
   return out
+}
+
+/**
+ * Region -> currency, for the 30 the ECB publishes.
+ *
+ * There is no browser API for "what currency does this locale use", so this is
+ * the small table that avoids defaulting everyone to the author's own currency.
+ * Someone in Toronto should not have to notice a dropdown to stop seeing their
+ * net worth in rupees.
+ */
+const REGION_CURRENCY: Record<string, string> = {
+  IN: 'INR', CA: 'CAD', US: 'USD', GB: 'GBP', AU: 'AUD', NZ: 'NZD',
+  SG: 'SGD', HK: 'HKD', JP: 'JPY', KR: 'KRW', CN: 'CNY', ID: 'IDR',
+  MY: 'MYR', PH: 'PHP', TH: 'THB', IL: 'ILS', TR: 'TRY', ZA: 'ZAR',
+  BR: 'BRL', MX: 'MXN', CH: 'CHF', NO: 'NOK', SE: 'SEK', DK: 'DKK',
+  IS: 'ISK', PL: 'PLN', CZ: 'CZK', HU: 'HUF', RO: 'RON',
+  // Euro area
+  DE: 'EUR', FR: 'EUR', ES: 'EUR', IT: 'EUR', NL: 'EUR', IE: 'EUR',
+  PT: 'EUR', AT: 'EUR', BE: 'EUR', FI: 'EUR', GR: 'EUR', SK: 'EUR',
+  SI: 'EUR', LT: 'EUR', LV: 'EUR', EE: 'EUR', LU: 'EUR', CY: 'EUR',
+  MT: 'EUR', HR: 'EUR', BG: 'EUR',
+}
+
+/** Best guess at the viewer's currency from their browser locale. */
+export function guessCurrency(fallback = 'USD'): string {
+  try {
+    for (const tag of navigator.languages ?? [navigator.language]) {
+      const region = new Intl.Locale(tag).maximize().region
+      const code = region && REGION_CURRENCY[region]
+      if (code) return code
+    }
+  } catch {
+    /* Intl.Locale is unavailable or the tag is malformed */
+  }
+  return fallback
 }

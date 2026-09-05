@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { slugify } from '../lib/cache'
+import { partitionByRegion } from '../lib/categories'
 import { CATEGORY_GROUPS, type Category, type CategoryGroup, type CategoryKind } from '../lib/types'
 
 export interface NewCategory {
@@ -8,18 +9,26 @@ export interface NewCategory {
   kind: CategoryKind
   group: CategoryGroup
   proposeGlobal: boolean
+  regions: string[]
 }
 
 export function CategorySelect({
-  categories, value, onChange, onAddNew,
+  categories, value, region, onChange, onAddNew,
 }: {
   categories: Category[]
   value: string
+  /** The portfolio's jurisdiction. Orders the list; never restricts it. */
+  region?: string | null
   onChange: (id: string) => void
   onAddNew: () => void
 }) {
-  const assets = categories.filter((c) => c.kind === 'asset')
-  const liabilities = categories.filter((c) => c.kind === 'liability')
+  // Never hidden, only demoted — see partitionByRegion.
+  const { relevant, elsewhere } = partitionByRegion(categories, region ?? null)
+
+  const byKind = (list: Category[], kind: Category['kind']) =>
+    list.filter((c) => c.kind === kind).map((c) => (
+      <option key={c.id} value={c.id}>{c.label}</option>
+    ))
 
   return (
     <select
@@ -27,12 +36,14 @@ export function CategorySelect({
       onChange={(e) => (e.target.value === '__new__' ? onAddNew() : onChange(e.target.value))}
     >
       <option value="" disabled>Choose a category…</option>
-      <optgroup label="Assets">
-        {assets.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-      </optgroup>
-      <optgroup label="Liabilities">
-        {liabilities.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-      </optgroup>
+      <optgroup label="Assets">{byKind(relevant, 'asset')}</optgroup>
+      <optgroup label="Liabilities">{byKind(relevant, 'liability')}</optgroup>
+      {elsewhere.length > 0 && (
+        <optgroup label="Other jurisdictions">
+          {byKind(elsewhere, 'asset')}
+          {byKind(elsewhere, 'liability')}
+        </optgroup>
+      )}
       <option value="__new__">+ Add a category…</option>
     </select>
   )
@@ -48,9 +59,10 @@ export function CategorySelect({
  * only real defence is putting them in front of you.
  */
 export function NewCategoryForm({
-  categories, onCancel, onCreate, busy, error,
+  categories, region, onCancel, onCreate, busy, error,
 }: {
   categories: Category[]
+  region?: string | null
   onCancel: () => void
   onCreate: (c: NewCategory) => void
   busy: boolean
@@ -94,7 +106,7 @@ export function NewCategoryForm({
               <button
                 key={c.id}
                 type="button"
-                onClick={() => { onCancel(); setTimeout(() => onCreate({ ...c, slug: c.id, proposeGlobal: false }), 0) }}
+                onClick={() => { onCancel(); setTimeout(() => onCreate({ ...c, slug: c.id, proposeGlobal: false, regions: c.regions }), 0) }}
                 style={{ padding: '4px 10px', fontSize: 13 }}
               >
                 {c.label}
@@ -147,7 +159,12 @@ export function NewCategoryForm({
           type="button"
           className="btn-primary"
           disabled={slug.length < 2 || !!exact || busy}
-          onClick={() => onCreate({ slug, label: label.trim(), kind, group, proposeGlobal })}
+          onClick={() => onCreate({
+            slug, label: label.trim(), kind, group, proposeGlobal,
+            // A category added inside an India folio is an India instrument
+            // unless it plainly is not; the user can still see it everywhere.
+            regions: region ? [region] : ['GLOBAL'],
+          })}
         >
           {busy ? 'Adding…' : 'Add category'}
         </button>

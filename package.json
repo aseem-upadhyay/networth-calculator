@@ -16,7 +16,10 @@
     "fb:proposals": "node scripts/setup-firebase.mjs proposals",
     "fb:approve": "node scripts/setup-firebase.mjs approve",
     "fb:reject": "node scripts/setup-firebase.mjs reject",
-    "fb:inspect": "node scripts/setup-firebase.mjs inspect"
+    "fb:inspect": "node scripts/setup-firebase.mjs inspect",
+    "fb:migrate": "node scripts/setup-firebase.mjs migrate-portfolios",
+    "fb:orphans": "node scripts/setup-firebase.mjs orphans",
+    "fb:catalog": "node scripts/setup-firebase.mjs rebuild-catalog"
   },
   "dependencies": {
     "firebase": "^12.4.0",

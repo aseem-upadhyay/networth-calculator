@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import type { User } from 'firebase/auth'
-import { fetchCurrencies, orderCurrencies } from '../lib/fx'
+import { fetchCurrencies, guessCurrency, orderCurrencies } from '../lib/fx'
 import { createProfile, HandleTakenError } from '../lib/repo'
 import { logout } from '../lib/auth'
-import type { Profile } from '../lib/types'
+
 
 /** Mirrors the /handles rule exactly. Diverging would fail at the database instead of here. */
 const HANDLE_RE = /^[a-z0-9_]{3,20}$/
@@ -17,10 +17,12 @@ export default function Onboarding({
   user, onDone,
 }: {
   user: User
-  onDone: (p: Profile) => void
+  onDone: () => void
 }) {
   const [handle, setHandle] = useState(() => suggestHandle(user.email ?? ''))
-  const [baseCurrency, setBaseCurrency] = useState('INR')
+  // Guessed from the browser locale rather than hardcoded, so a Canadian is
+  // not shown rupees by default.
+  const [baseCurrency, setBaseCurrency] = useState(guessCurrency)
   const [cadence, setCadence] = useState<6 | 12>(12)
   const [currencies, setCurrencies] = useState<Record<string, string>>({})
   const [busy, setBusy] = useState(false)
@@ -40,13 +42,13 @@ export default function Onboarding({
     setBusy(true)
     setError(null)
     try {
-      const profile = await createProfile(user.uid, {
+      await createProfile(user.uid, {
         handle,
         email: user.email ?? '',
         baseCurrency,
         cadenceMonths: cadence,
       })
-      onDone(profile)
+      onDone()
     } catch (err) {
       setError(
         err instanceof HandleTakenError
@@ -103,7 +105,10 @@ export default function Onboarding({
                 </option>
               ))}
             </select>
-            <p className="hint">Individual holdings can be in any currency.</p>
+            <p className="hint">
+              Individual holdings can be in any currency, and you can change
+              this later without losing history.
+            </p>
           </div>
 
           <div className="field">

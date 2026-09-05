@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { buildSeries, cagr, computeDeltas, computeTotals, daysBetween, kindLookup } from './calc'
+import {
+  availableDisplayCurrencies, buildSeries, cagr, computeDeltas, computeTotals,
+  daysBetween, kindLookup,
+} from './calc'
 import { convertToBase, MissingRateError } from './money'
 import type { Category, Snapshot } from './types'
 
 const cats: Category[] = [
-  { id: 'mutual-funds', label: 'Mutual Funds', kind: 'asset', group: 'equity', tier: 'global' },
-  { id: 'rsu', label: 'RSU', kind: 'asset', group: 'equity', tier: 'global' },
-  { id: 'home-loan', label: 'Home Loan', kind: 'liability', group: 'liability', tier: 'global' },
+  { id: 'mutual-funds', label: 'Mutual Funds', kind: 'asset', group: 'equity', regions: ['GLOBAL'], tier: 'global' },
+  { id: 'rsu', label: 'RSU', kind: 'asset', group: 'equity', regions: ['GLOBAL'], tier: 'global' },
+  { id: 'home-loan', label: 'Home Loan', kind: 'liability', group: 'liability', regions: ['GLOBAL'], tier: 'global' },
 ]
 const kinds = kindLookup(cats)
 
@@ -160,5 +163,79 @@ describe('daysBetween', () => {
   it('is timezone-stable', () => {
     expect(daysBetween('2025-08-31', '2026-08-31')).toBe(365)
     expect(daysBetween('2024-02-28', '2024-03-01')).toBe(2) // leap year
+  })
+})
+
+describe('changing reporting currency', () => {
+  // The scenario: someone tracked in INR, then moved to Canada and switched to
+  // CAD. Older snapshots keep their INR-denominated frozen tables, and a rate
+  // table never contains its own base — so this used to throw and fall back to
+  // wrong numbers rather than converting.
+  const inrSnap: Snapshot = {
+    ...prev,
+    baseCurrency: 'INR',
+    fxRates: { USD: 0.0114, CAD: 0.01571 },
+    holdings: [{ categoryId: 'mutual-funds', amount: 1_000_000, currency: 'INR', contributed: 0 }],
+  }
+  const cadSnap: Snapshot = {
+    ...curr,
+    baseCurrency: 'CAD',
+    fxRates: { USD: 0.726, INR: 63.66 },
+    holdings: [{ categoryId: 'mutual-funds', amount: 20_000, currency: 'CAD', contributed: 2_000 }],
+  }
+
+  it('reports an INR-era snapshot in CAD', () => {
+    const t = computeTotals(inrSnap.holdings, kinds, inrSnap.fxRates, 'INR', 'CAD')
+    expect(t.net).toBeCloseTo(15_710, 2) // 1,000,000 x 0.01571
+  })
+
+  it('builds a continuous series across a currency switch', () => {
+    const { points, exact } = buildSeries([inrSnap, cadSnap], { displayCurrency: 'CAD' })
+    expect(exact).toBe(true)
+    expect(points[0].net).toBeCloseTo(15_710, 2)
+    expect(points[1].net).toBeCloseTo(20_000, 2)
+  })
+
+  it('computes deltas across the switch without falling back', () => {
+    const [d] = computeDeltas(inrSnap, cadSnap, 'CAD')
+    expect(d.exact).toBe(true)
+    expect(d.start).toBeCloseTo(15_710, 2)
+    expect(d.end).toBeCloseTo(20_000, 2)
+    expect(d.contributed + d.fxEffect + d.investmentReturn).toBeCloseTo(d.change, 6)
+  })
+
+  it('shows the same portfolio in any currency', () => {
+    const inCad = computeTotals(inrSnap.holdings, kinds, inrSnap.fxRates, 'INR', 'CAD')
+    const inUsd = computeTotals(inrSnap.holdings, kinds, inrSnap.fxRates, 'INR', 'USD')
+    const inInr = computeTotals(inrSnap.holdings, kinds, inrSnap.fxRates, 'INR')
+    expect(inInr.net).toBe(1_000_000)
+    expect(inCad.net).toBeCloseTo(15_710, 2)
+    expect(inUsd.net).toBeCloseTo(11_400, 2)
+  })
+})
+
+describe('availableDisplayCurrencies', () => {
+  const mk = (rates: Record<string, number>, base = 'INR'): Snapshot =>
+    ({ ...prev, baseCurrency: base, fxRates: rates })
+
+  it('offers only what every snapshot can reach', () => {
+    // BGN exists in the older table and not the newer one, so it must not be
+    // offered — picking it would throw mid-render on the newer snapshot.
+    const out = availableDisplayCurrencies([
+      mk({ USD: 1, CAD: 2, BGN: 3 }),
+      mk({ USD: 1, CAD: 2 }),
+    ])
+    expect(out).toEqual(['CAD', 'INR', 'USD'])
+    expect(out).not.toContain('BGN')
+  })
+
+  it('always includes each snapshot base, which its own table omits', () => {
+    // A rate table never contains its own base, but the snapshot is trivially
+    // expressible in it.
+    expect(availableDisplayCurrencies([mk({ USD: 1 })])).toContain('INR')
+  })
+
+  it('is empty with no snapshots', () => {
+    expect(availableDisplayCurrencies([])).toEqual([])
   })
 })

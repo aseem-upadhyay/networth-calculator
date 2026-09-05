@@ -3,7 +3,7 @@ import {
   Area, AreaChart, CartesianGrid, Line, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts'
 import { buildSeries } from '../lib/calc'
-import { convertToBase, formatMoney } from '../lib/money'
+import { convertBetween, formatMoney } from '../lib/money'
 import { GROUP_LABEL, GROUP_ORDER, groupColor, surface } from '../lib/palette'
 import { useDarkMode } from '../hooks/useDarkMode'
 import type { Category, CategoryGroup, Snapshot } from '../lib/types'
@@ -22,26 +22,30 @@ type Mode = 'absolute' | 'share'
  * index axis would do at this cadence.
  */
 export default function Growth({
-  snapshots, categories,
+  snapshots, categories, displayCurrency,
 }: {
   snapshots: Snapshot[]
   categories: Category[]
+  displayCurrency?: string
 }) {
   const dark = useDarkMode()
   const [mode, setMode] = useState<Mode>('absolute')
   const [constant, setConstant] = useState(false)
 
-  const base = snapshots.at(-1)!.baseCurrency
+  const base = displayCurrency ?? snapshots.at(-1)!.baseCurrency
   const bg = surface(dark)
 
   const { points, groups, exact } = useMemo(() => {
     const groupOf = new Map(categories.map((c) => [c.id, c.group]))
-    const { points: raw, exact } = buildSeries(snapshots, { constantCurrency: constant })
+    const { points: raw, exact } = buildSeries(snapshots, {
+      constantCurrency: constant, displayCurrency: base,
+    })
     const seen = new Set<CategoryGroup>()
 
     const rows = raw.map((p, i) => {
       const snap = [...snapshots].sort((a, b) => a.asOfDate.localeCompare(b.asOfDate))[i]
       const rates = constant ? snapshots.at(-1)!.fxRates : snap.fxRates
+      const rateBase = constant ? snapshots.at(-1)!.baseCurrency : snap.baseCurrency
       const out: Record<string, number | string> = { asOfDate: p.asOfDate, t: p.t }
       let total = 0
 
@@ -49,9 +53,9 @@ export default function Growth({
         const g = groupOf.get(h.categoryId) ?? 'alternative'
         let v: number
         try {
-          v = convertToBase(h.amount, h.currency, rates, base)
+          v = convertBetween(h.amount, h.currency, base, rates, rateBase)
         } catch {
-          v = convertToBase(h.amount, h.currency, snap.fxRates, base)
+          v = convertBetween(h.amount, h.currency, base, snap.fxRates, snap.baseCurrency)
         }
         // Liabilities subtract from net worth but cannot be a stacked band —
         // they are tracked into the net line instead.
@@ -95,7 +99,7 @@ export default function Growth({
     <div className="card">
       <div className="spread" style={{ marginBottom: 4, flexWrap: 'wrap' }}>
         <h2 style={{ margin: 0 }}>Growth by group</h2>
-        <div className="row" style={{ flex: '0 0 auto', gap: 8 }}>
+        <div className="row seg-group">
           <div className="seg">
             <button className={mode === 'absolute' ? 'on' : ''} onClick={() => setMode('absolute')}>
               Value
