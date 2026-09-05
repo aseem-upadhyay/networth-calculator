@@ -1,6 +1,7 @@
 import {
   collection, collectionGroup, deleteField, doc, getDocFromServer, getDocsFromServer,
-  increment, orderBy, query, serverTimestamp, setDoc, Timestamp, updateDoc, writeBatch,
+  increment, orderBy, query, serverTimestamp, setDoc, Timestamp, updateDoc, where,
+  writeBatch,
 } from 'firebase/firestore'
 import { getDb } from './firebase'
 import { computeTotals, kindLookup } from './calc'
@@ -376,4 +377,65 @@ export async function rejectProposal(
     status: 'rejected', reviewedBy: reviewerUid, reviewedAt: serverTimestamp(),
     rejectionReason: reason,
   })
+}
+
+/* --------------------------------------------------------- account exit --- */
+
+export interface DeletionSummary {
+  snapshots: number
+  customCategories: number
+  proposalsWithdrawn: number
+  handleReleased: boolean
+}
+
+/**
+ * Delete everything this account owns.
+ *
+ * Firestore has no recursive delete from a client, so every document is
+ * enumerated and removed explicitly. Volumes here are tiny — a lifetime of
+ * yearly snapshots is ~20 documents — so a single batch covers it comfortably
+ * inside the 500-operation limit.
+ *
+ * Order matters: Firestore data goes first, while the user is still
+ * authenticated and the rules still recognise them as the owner. Deleting the
+ * auth record first would strip that permission and strand the data forever
+ * with no one able to reach it.
+ *
+ * What deliberately survives, and is stated plainly in the UI rather than
+ * quietly omitted: category suggestions already approved into the shared
+ * catalog. They belong to every user by then, and pulling one would break every
+ * historical snapshot referencing that slug.
+ */
+export async function deleteAccount(uid: string, handle: string): Promise<DeletionSummary> {
+  const db = getDb()
+
+  const [snaps, customs, proposals] = await Promise.all([
+    getDocsFromServer(collection(db, 'users', uid, 'snapshots')),
+    getDocsFromServer(collection(db, 'users', uid, 'customCategories')),
+    getDocsFromServer(
+      query(collection(db, 'categoryProposals'), where('proposedBy', '==', uid)),
+    ),
+  ])
+
+  const batch = writeBatch(db)
+  snaps.docs.forEach((d) => batch.delete(d.ref))
+  customs.docs.forEach((d) => batch.delete(d.ref))
+
+  // Only pending ones: the rules refuse a decided proposal, and a rejection
+  // needs to persist so the same slug cannot simply be resubmitted.
+  const pending = proposals.docs.filter((d) => d.data().status === 'pending')
+  pending.forEach((d) => batch.delete(d.ref))
+
+  batch.delete(doc(db, 'users', uid, 'stats', 'current'))
+  batch.delete(doc(db, 'handles', handle))
+  batch.delete(doc(db, 'users', uid))
+
+  await batch.commit()
+
+  return {
+    snapshots: snaps.size,
+    customCategories: customs.size,
+    proposalsWithdrawn: pending.length,
+    handleReleased: true,
+  }
 }

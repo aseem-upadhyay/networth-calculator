@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { computeTotals, kindLookup } from '../lib/calc'
 import { convertToBase, formatMoney, MissingRateError } from '../lib/money'
-import { addCustomCategory, saveSnapshot, type SnapshotDraft } from '../lib/repo'
+import type { SnapshotDraft } from '../lib/repo'
 import { orderCurrencies } from '../lib/fx'
 import { useRates } from '../hooks/useRates'
 import { CategorySelect, NewCategoryForm, type NewCategory } from '../components/CategoryPicker'
@@ -18,16 +18,28 @@ const emptyRow = (currency: string): Holding => ({
   categoryId: '', amount: 0, currency, contributed: 0,
 })
 
+/**
+ * Persistence arrives as props rather than imports, so the same editor drives
+ * the real Firestore-backed app and the in-memory demo. Nothing in here knows
+ * which one it is running inside.
+ */
+export interface EditorPersistence {
+  saveSnapshot: (
+    draft: SnapshotDraft, categories: Category[],
+  ) => Promise<{ snapshots: Snapshot[]; categories: Category[] }>
+  createCategory: (c: NewCategory) => Promise<Category>
+}
+
 export default function SnapshotEditor({
-  uid, profile, snapshots, categories, currencies, editing, onSaved, onCancel,
+  profile, snapshots, categories, currencies, editing, persistence, onSaved, onCancel,
 }: {
-  uid: string
   profile: Profile
   snapshots: Snapshot[]
   categories: Category[]
   currencies: Record<string, string>
   /** The snapshot being edited, or undefined to start a new one. */
   editing?: Snapshot
+  persistence: EditorPersistence
   onSaved: (data: { snapshots: Snapshot[]; categories: Category[] }) => void
   onCancel: () => void
 }) {
@@ -82,9 +94,7 @@ export default function SnapshotEditor({
     setCatBusy(true)
     setCatError(null)
     try {
-      const { category } = await addCustomCategory(uid, {
-        ...c, handle: profile.handle, categoriesCreated: profile.categoriesCreated,
-      })
+      const category = await persistence.createCategory(c)
       setLocalCats((cs) => [...cs, category].sort((a, b) => a.label.localeCompare(b.label)))
       if (row !== null) patch(row, { categoryId: category.id })
       setAddingFor(null)
@@ -108,7 +118,7 @@ export default function SnapshotEditor({
         note: note.trim() || undefined,
         holdings: holdings.filter((h) => h.categoryId),
       }
-      const data = await saveSnapshot(uid, draft, localCats, snapshots)
+      const data = await persistence.saveSnapshot(draft, localCats)
       onSaved({ snapshots: data.snapshots, categories: data.categories })
     } catch (e) {
       setSaveError((e as Error).message)

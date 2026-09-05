@@ -1,5 +1,7 @@
 import { useState } from 'react'
 import { signInWithGoogle } from '../lib/auth'
+import { RULES_URL } from '../lib/meta'
+import Footer from '../components/Footer'
 
 export default function SignIn() {
   const [busy, setBusy] = useState(false)
@@ -39,18 +41,41 @@ export default function SignIn() {
 
         {error && <p className="error small" style={{ marginTop: 12 }}>{error}</p>}
 
+        <button
+          onClick={() => { location.search = '?demo' }}
+          style={{ width: '100%', marginTop: 8 }}
+        >
+          Try the demo — no sign-in, nothing saved
+        </button>
+
         {/*
-          PLAN.md F13. The admin console can read aggregate net-worth figures,
-          which inverts the per-user isolation everything else guarantees. That
-          costs one sentence to disclose, and the disclosure is the whole
-          difference between an operator with visibility and an operator with
-          undisclosed visibility.
+          The earlier wording here said holdings were "readable only by you",
+          which was false: Firestore rules do not apply to Firebase Console
+          access, so the operator can read the database directly. An overclaim
+          is worse than no claim — if a user ever discovers it, every other
+          statement becomes suspect. So this says the true, less comfortable
+          thing, and points at the rules so it can be checked rather than
+          believed.
         */}
-        <p className="dim small" style={{ marginTop: 22 }}>
-          Your holdings are private and readable only by you. Aggregate usage
-          statistics — how many accounts exist, and net-worth totals grouped by
-          currency — are visible to whoever operates this app.
-        </p>
+        <div className="dim small" style={{ marginTop: 22, lineHeight: 1.6 }}>
+          <p style={{ margin: '0 0 8px' }}>
+            <strong style={{ color: 'var(--text)' }}>No other user can see your holdings.</strong>{' '}
+            That is enforced by{' '}
+            <a href={RULES_URL} target="_blank" rel="noreferrer noopener">database rules</a>, not
+            just by this interface — you can read them yourself.
+          </p>
+          <p style={{ margin: '0 0 8px' }}>
+            The operator can access the database directly, as with any
+            self-hosted app. What this app shows them is deliberately limited to
+            aggregates: how many accounts exist, and net-worth totals grouped by
+            currency, with no names attached.
+          </p>
+          <p style={{ margin: 0 }}>
+            You can export everything as JSON at any time, and delete your
+            account and all its data permanently.
+          </p>
+        </div>
+        <Footer />
       </div>
     </div>
   )

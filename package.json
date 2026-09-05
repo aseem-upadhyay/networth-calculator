@@ -15,7 +15,8 @@
     "fb:status": "node scripts/setup-firebase.mjs status",
     "fb:proposals": "node scripts/setup-firebase.mjs proposals",
     "fb:approve": "node scripts/setup-firebase.mjs approve",
-    "fb:reject": "node scripts/setup-firebase.mjs reject"
+    "fb:reject": "node scripts/setup-firebase.mjs reject",
+    "fb:inspect": "node scripts/setup-firebase.mjs inspect"
   },
   "dependencies": {
     "firebase": "^12.4.0",

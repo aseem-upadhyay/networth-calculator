@@ -1,4 +1,7 @@
-import { signInWithPopup, signOut, type User } from 'firebase/auth'
+import {
+  deleteUser, GoogleAuthProvider, reauthenticateWithPopup, signInWithPopup, signOut,
+  type User,
+} from 'firebase/auth'
 import { terminate } from 'firebase/firestore'
 import { clearPrivateCache } from './cache'
 import { getAuthClient, getDb, googleProvider, readyAuth } from './firebase'
@@ -47,4 +50,21 @@ export async function logout(uid: string | null): Promise<void> {
   }
 
   window.location.replace(import.meta.env.BASE_URL)
+}
+
+/**
+ * Remove the Firebase Auth record itself, after the Firestore data is gone.
+ *
+ * Firebase refuses this on a stale session (`auth/requires-recent-login`), which
+ * is the correct behaviour for a destructive action — so re-prompt through
+ * Google once and retry rather than surfacing a cryptic error code.
+ */
+export async function deleteAuthUser(user: User): Promise<void> {
+  try {
+    await deleteUser(user)
+  } catch (e) {
+    if ((e as { code?: string }).code !== 'auth/requires-recent-login') throw e
+    await reauthenticateWithPopup(user, new GoogleAuthProvider())
+    await deleteUser(user)
+  }
 }

@@ -66,7 +66,8 @@ service cloud.firestore {
       allow read: if isAdmin();
     }
 
-    // Unique display handles. Create-only, so a handle is never reassigned.
+    // Unique display handles. Never reassigned by anyone but their owner, and
+    // never editable in place.
     match /handles/{handle} {
       allow read: if isSignedIn();
       allow create: if isSignedIn()
@@ -74,7 +75,12 @@ service cloud.firestore {
         && request.resource.data.keys().hasOnly(['uid', 'createdAt'])
         && request.resource.data.uid == request.auth.uid
         && request.resource.data.createdAt == request.time;
-      allow update, delete: if false;
+      allow update: if false;
+      // Releasable by its owner. Without this, "delete my account" would leave
+      // a permanent handle -> uid mapping behind, which makes the promise false.
+      // The cost is that handles become reclaimable; attribution already frozen
+      // into past proposals is a copied string, so history does not change.
+      allow delete: if isSignedIn() && resource.data.uid == request.auth.uid;
     }
 
     // Global catalog: readable by any signed-in user, ADMIN-WRITE-ONLY.
@@ -111,7 +117,12 @@ service cloud.firestore {
         && request.resource.data.reviewedBy == request.auth.uid
         && request.resource.data.reviewedAt == request.time;
 
-      allow delete: if false;
+      // A proposer may withdraw their own suggestion while it is still pending.
+      // Once ruled on it stays, because an approved catalog entry needs its
+      // provenance and a rejection needs to stop the same slug coming back.
+      allow delete: if isSignedIn()
+        && resource.data.proposedBy == request.auth.uid
+        && resource.data.status == 'pending';
     }
   }
 }
