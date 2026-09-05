@@ -4,7 +4,7 @@ import { deleteAuthUser } from '../lib/auth'
 import { clearPrivateCache } from '../lib/cache'
 import { buildBackup, downloadBackup } from '../lib/export'
 import { deleteAccount } from '../lib/repo'
-import type { Category, Profile, Snapshot } from '../lib/types'
+import type { Category, Portfolio, Profile, Snapshot } from '../lib/types'
 
 /**
  * Leaving has to be as easy as joining, or "your data is yours" is decoration.
@@ -15,11 +15,12 @@ import type { Category, Profile, Snapshot } from '../lib/types'
  * by muscle memory.
  */
 export default function DeleteAccount({
-  user, profile, snapshots, categories, onCancel,
+  user, profile, portfolios, snapshots, categories, onCancel,
 }: {
   user: User
   profile: Profile
-  snapshots: Snapshot[]
+  portfolios: Portfolio[]
+  snapshots: Record<string, Snapshot[]>
   categories: Category[]
   onCancel: () => void
 }) {
@@ -27,6 +28,7 @@ export default function DeleteAccount({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [exported, setExported] = useState(false)
+  const total = Object.values(snapshots).flat().length
 
   const confirmed = typed.trim() === profile.handle
 
@@ -64,7 +66,7 @@ export default function DeleteAccount({
         <button
           style={{ width: '100%', marginBottom: 20 }}
           onClick={() => {
-            downloadBackup(buildBackup(profile, snapshots, categories))
+            downloadBackup(buildBackup(profile, portfolios, snapshots, categories))
             setExported(true)
           }}
         >
@@ -74,7 +76,7 @@ export default function DeleteAccount({
         <div className="card" style={{ background: 'var(--surface-2)', marginBottom: 20 }}>
           <p style={{ margin: '0 0 8px', fontWeight: 550 }}>What gets deleted</p>
           <ul className="small dim" style={{ margin: 0, paddingLeft: 18 }}>
-            <li>{snapshots.length} snapshot{snapshots.length === 1 ? '' : 's'} and every holding in them</li>
+            <li>{total} snapshot{total === 1 ? '' : 's'} across {portfolios.length} portfolio{portfolios.length === 1 ? '' : 's'}, and every holding in them</li>
             <li>Your profile, reporting currency, and the handle @{profile.handle}</li>
             <li>Private categories you created, and any suggestion still awaiting review</li>
             <li>Your sign-in record — this app forgets your email entirely</li>

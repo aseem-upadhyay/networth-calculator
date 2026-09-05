@@ -5,7 +5,7 @@ import type { SnapshotDraft } from '../lib/repo'
 import { orderCurrencies } from '../lib/fx'
 import { useRates } from '../hooks/useRates'
 import { CategorySelect, NewCategoryForm, type NewCategory } from '../components/CategoryPicker'
-import type { Category, FxRates, Holding, Profile, Snapshot } from '../lib/types'
+import type { Category, FxRates, Holding, Portfolio, Snapshot } from '../lib/types'
 
 /** Stable empty table: a `{}` literal per render would bust every memo below. */
 const NO_RATES: FxRates = {}
@@ -31,9 +31,10 @@ export interface EditorPersistence {
 }
 
 export default function SnapshotEditor({
-  profile, snapshots, categories, currencies, editing, persistence, onSaved, onCancel,
+  portfolio, snapshots, categories, currencies, editing, persistence, onSaved, onCancel,
 }: {
-  profile: Profile
+  /** The folio being edited: supplies the default currency and the region bias. */
+  portfolio: Portfolio
   snapshots: Snapshot[]
   categories: Category[]
   currencies: Record<string, string>
@@ -49,14 +50,14 @@ export default function SnapshotEditor({
   )
 
   const [asOfDate, setAsOfDate] = useState(editing?.asOfDate ?? todayIso())
-  const [baseCurrency, setBase] = useState(editing?.baseCurrency ?? profile.baseCurrency)
+  const [baseCurrency, setBase] = useState(editing?.baseCurrency ?? portfolio.baseCurrency)
   const [note, setNote] = useState(editing?.note ?? '')
   const [holdings, setHoldings] = useState<Holding[]>(() => {
     if (editing) return editing.holdings.map((h) => ({ ...h, contributed: 0 }))
     // Prefill from the previous snapshot so a yearly update is "edit 8 numbers"
     // rather than "re-enter everything from scratch".
     if (previous) return previous.holdings.map((h) => ({ ...h, contributed: 0 }))
-    return [emptyRow(profile.baseCurrency)]
+    return [emptyRow(portfolio.baseCurrency)]
   })
 
   const [localCats, setLocalCats] = useState<Category[]>(categories)
@@ -199,10 +200,11 @@ export default function SnapshotEditor({
           }
           return (
             <div key={i} style={{ paddingBottom: 12, marginBottom: 12, borderBottom: '1px solid var(--border)' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1fr 1.2fr auto', gap: 8, alignItems: 'end' }}>
+              <div className="holding-row">
                 <div>
                   <label className="small dim">Category</label>
                   <CategorySelect categories={localCats} value={h.categoryId}
+                    region={portfolio.region}
                     onChange={(id) => patch(i, { categoryId: id })}
                     onAddNew={() => setAddingFor(i)} />
                 </div>
@@ -225,9 +227,12 @@ export default function SnapshotEditor({
                 <button type="button" onClick={() => setHoldings((hs) => hs.filter((_, j) => j !== i))}
                   disabled={holdings.length === 1} title="Remove">×</button>
               </div>
-              {converted && <p className="hint" style={{ marginTop: 4 }}>= {converted}</p>}
+              {converted && (
+                <p className="hint" style={{ marginTop: 4 }}>= <span className="num">{converted}</span></p>
+              )}
               {addingFor === i && (
-                <NewCategoryForm categories={localCats} busy={catBusy} error={catError}
+                <NewCategoryForm categories={localCats} region={portfolio.region}
+                  busy={catBusy} error={catError}
                   onCancel={() => { setAddingFor(null); setCatError(null) }}
                   onCreate={(c) => void createCategory(c)} />
               )}

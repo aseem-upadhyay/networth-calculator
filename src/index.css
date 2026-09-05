@@ -205,6 +205,8 @@ body.redacted .bar-fill { filter: blur(3px); }
   font-size: 14px;
 }
 .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.actions { flex: 0 0 auto; gap: 8px; }
+.seg-group { flex: 0 0 auto; gap: 8px; }
 
 /* ---------- demo ---------- */
 .demo-bar {
@@ -222,3 +224,115 @@ body.redacted .bar-fill { filter: blur(3px); }
   border-bottom: 1px solid var(--border);
 }
 .demo-bar button { padding: 4px 12px; font-size: 13px; }
+
+/* Chart amounts are strings inside Recharts' own markup, so they cannot go
+   through <Money> and would otherwise stay legible with the blur on. The Y axis
+   carries the magnitudes and every tooltip carries an exact figure; the X axis
+   is dates and stays readable so the shape is still interpretable. */
+body.redacted .recharts-yAxis-tick-labels,
+body.redacted .recharts-tooltip-wrapper {
+  filter: blur(6px);
+}
+
+.tag {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.warn { color: var(--accent); }
+.grid-cards { display: grid; gap: 12px; }
+
+
+/* ---------- responsive layouts ----------
+   These were inline `gridTemplateColumns`, which cannot carry a media query —
+   which is exactly why the page scrolled sideways at 375px. */
+
+/* Donut beside its legend; stacked once there is no room for two columns. */
+.chart-split {
+  display: grid;
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: center;
+}
+
+/* One holding: category, value, currency, contribution, remove. */
+.holding-row {
+  display: grid;
+  grid-template-columns: 2fr 1.2fr 1fr 1.2fr auto;
+  gap: 8px;
+  align-items: end;
+}
+
+@media (max-width: 640px) {
+  .app { padding: 20px 14px 60px; }
+
+  .chart-split { grid-template-columns: minmax(0, 1fr); }
+  /* `margin: 0 auto` here collapsed the chart to zero width: auto margins stop a
+     grid item stretching and size it to content, and ResponsiveContainer has no
+     intrinsic width to size to. Centre with justify-self and keep width: 100%. */
+  .chart-split > :first-child {
+    width: 100%;
+    max-width: 260px;
+    justify-self: center;
+  }
+
+  /* Two columns per row rather than five squeezed across. The remove button
+     spans the full width so it stays a real tap target. */
+  .holding-row { grid-template-columns: 1fr 1fr; }
+  .holding-row > :nth-child(1) { grid-column: 1 / -1; }
+  .holding-row > button { grid-column: 1 / -1; justify-self: stretch; }
+
+  /* Stacked, so a header does not force the page wider than the screen. */
+  .spread { flex-wrap: wrap; }
+  /* Tighter gap and shrinkable children: two buttons plus a 12px gap overran
+     348px of usable width by 3px, which is all it takes to scroll a page. */
+  .row { flex-wrap: wrap; gap: 8px; }
+  .row > * { flex: 1 1 auto; min-width: 0; }
+  .row > button { flex: 0 1 auto; }
+
+  .legend-row { flex-wrap: wrap; gap: 6px; }
+  .legend-row .num { margin-left: auto; }
+
+  h1 { font-size: 20px; }
+  .num { overflow-wrap: anywhere; }
+
+  /* Segmented controls keep their labels on one line — but two of them side by
+     side (Value|Share next to As reported|Constant currency) came to 341px in
+     ~300px of usable width. Give each its own full-width row instead of letting
+     three pixels of overflow scroll the page. */
+  .seg { flex-wrap: nowrap; }
+  .seg button { white-space: nowrap; padding: 5px 8px; font-size: 12px; }
+
+  .seg-group {
+    flex: 1 1 100%;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .seg-group .seg { width: 100%; }
+  .seg-group .seg button { flex: 1 1 0; }
+
+  /* Action buttons keep their intrinsic size and wrap onto a new line rather
+     than squeezing a header past the viewport. */
+  .actions { flex: 1 1 100%; justify-content: flex-start; }
+
+  .demo-bar { padding: 8px 14px; font-size: 12px; }
+  .toolbar { gap: 6px; }
+  .toolbar button { flex: 0 1 auto; }
+}
+
+/* The real cause of sideways scroll: a grid or flex item defaults to
+   `min-width: auto`, which means "never shrink below my content". A 770px table
+   therefore widens its card, its grid, and the page — and `.chart-scroll`'s
+   overflow never engages because its box was allowed to grow instead.
+   `min-width: 0` restores shrinking, so the table scrolls inside its own box.
+   Fixing this rather than clipping with overflow-x:hidden, which hid the
+   overflow while cutting the charts off mid-render. */
+.app > *, .grid-cards > *, .card { min-width: 0; }
+.chart-scroll { min-width: 0; max-width: 100%; }
+.stack > * { min-width: 0; }

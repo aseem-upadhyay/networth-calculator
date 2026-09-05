@@ -40,6 +40,45 @@ export function convertToBase(
   return amount / rate
 }
 
+/**
+ * Convert between any two currencies using one snapshot's frozen rate table.
+ *
+ * `rateBase` is the currency the table is denominated against — a Frankfurter
+ * response with `base=INR` gives `{USD: 0.01134, CAD: 0.01571}`, meaning
+ * 1 INR = that much foreign. Crucially, **a table never contains its own base**,
+ * so going INR -> CAD cannot be done by treating CAD as the base and looking up
+ * `rates['INR']`; it is a multiply by `rates['CAD']` instead.
+ *
+ * This is what lets the whole app be re-rendered in any currency retroactively.
+ * Every snapshot froze a full ~30-currency table at save time, so a portfolio
+ * recorded in INR can be shown in CAD exactly — using the rates that applied on
+ * each valuation date, not today's.
+ */
+export function convertBetween(
+  amount: number,
+  from: string,
+  to: string,
+  rates: FxRates,
+  rateBase: string,
+): number {
+  if (from === to) return amount
+
+  // Step 1: into the table's base.
+  let inBase: number
+  if (from === rateBase) inBase = amount
+  else {
+    const r = rates[from]
+    if (!r) throw new MissingRateError(from)
+    inBase = amount / r
+  }
+
+  // Step 2: out of the table's base into the target.
+  if (to === rateBase) return inBase
+  const t = rates[to]
+  if (!t) throw new MissingRateError(to)
+  return inBase * t
+}
+
 /** Convert out of the base currency into `currency`. The inverse of the above. */
 export function convertFromBase(
   amount: number,

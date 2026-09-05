@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { mergeCategories, slugify } from './cache'
+import { inRegion, partitionByRegion } from './categories'
 import type { Category } from './types'
 
 const cat = (id: string, label: string, tier: Category['tier']): Category =>
-  ({ id, label, kind: 'asset', group: 'equity', tier })
+  ({ id, label, kind: 'asset', group: 'equity', regions: ['GLOBAL'], tier })
 
 describe('slugify', () => {
   it('collapses casing and punctuation so near-identical labels collide', () => {
@@ -67,5 +68,32 @@ describe('optional-field handling', () => {
   it('leaves a holding without a note writable', () => {
     const holding = { categoryId: 'gold', amount: 5, currency: 'INR', contributed: 0, note: undefined }
     expect(Object.keys(strip(holding))).not.toContain('note')
+  })
+})
+
+describe('region filtering', () => {
+  const c = (id: string, regions: string[]): Category =>
+    ({ id, label: id, kind: 'asset', group: 'equity', regions, tier: 'global' })
+
+  it('demotes rather than hides instruments from elsewhere', () => {
+    // Hiding a 401(k) from someone with an India folio would stop them recording
+    // money they actually have.
+    const { relevant, elsewhere } = partitionByRegion(
+      [c('epf', ['IN']), c('401k', ['US']), c('gold', ['GLOBAL'])], 'IN',
+    )
+    expect(relevant.map((x) => x.id)).toEqual(['epf', 'gold'])
+    expect(elsewhere.map((x) => x.id)).toEqual(['401k'])
+  })
+
+  it('treats a portfolio with no country as accepting everything', () => {
+    const { relevant, elsewhere } = partitionByRegion([c('epf', ['IN']), c('isa', ['GB'])], null)
+    expect(relevant).toHaveLength(2)
+    expect(elsewhere).toHaveLength(0)
+  })
+
+  it('handles a category listed in several regions', () => {
+    const pension = c('workplace-pension', ['GB', 'US', 'CA'])
+    expect(inRegion(pension, 'CA')).toBe(true)
+    expect(inRegion(pension, 'IN')).toBe(false)
   })
 })

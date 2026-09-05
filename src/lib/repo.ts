@@ -1,12 +1,14 @@
+import type { DocumentReference } from 'firebase/firestore'
 import {
   collection, collectionGroup, deleteField, doc, getDocFromServer, getDocsFromServer,
-  increment, orderBy, query, serverTimestamp, setDoc, Timestamp, updateDoc, where,
+  deleteDoc, increment, orderBy, query, serverTimestamp, setDoc, Timestamp, updateDoc, where,
   writeBatch,
 } from 'firebase/firestore'
 import { getDb } from './firebase'
 import { computeTotals, kindLookup } from './calc'
-import { mergeCategories, writeCategories, writePrivateCache } from './cache'
-import type { Category, CategoryProposal, Profile, Snapshot } from './types'
+import { mergeCategories, readCategories, writeCategories, writePrivateCache } from './cache'
+import type { Backup } from './export'
+import type { Category, CategoryProposal, Portfolio, Profile, Snapshot } from './types'
 
 /** Firestore Timestamp -> epoch ms. Null while a serverTimestamp() is unresolved. */
 function ms(v: unknown): number | null {
@@ -15,8 +17,19 @@ function ms(v: unknown): number | null {
 
 export interface LoadedData {
   profile: Profile | null
-  snapshots: Snapshot[]
+  portfolios: Portfolio[]
+  /** portfolioId -> that folio's own timeline. Each has its own dates. */
+  snapshots: Record<string, Snapshot[]>
   categories: Category[]
+}
+
+function toSnapshot(id: string, raw: Record<string, unknown>): Snapshot {
+  return {
+    ...raw,
+    asOfDate: id,
+    recordedAt: ms(raw.recordedAt),
+    updatedAt: ms(raw.updatedAt),
+  } as Snapshot
 }
 
 /**
@@ -29,43 +42,91 @@ export interface LoadedData {
  * A null `profile` means the account exists in Auth but has not been onboarded
  * — the caller sends them to pick a handle.
  */
-export async function hardRefresh(uid: string): Promise<LoadedData> {
+export async function hardRefresh(uid: string, opts: { force?: boolean } = {}): Promise<LoadedData> {
   const db = getDb()
 
-  const [profSnap, snapsSnap, globalSnap, customSnap] = await Promise.all([
+  const [profSnap, folioSnap, globalCats, customSnap] = await Promise.all([
     getDocFromServer(doc(db, 'users', uid)),
-    getDocsFromServer(query(collection(db, 'users', uid, 'snapshots'), orderBy('asOfDate'))),
-    getDocsFromServer(collection(db, 'categories')),
+    getDocsFromServer(query(collection(db, 'users', uid, 'portfolios'), orderBy('order'))),
+    loadGlobalCategories(opts.force),
     getDocsFromServer(collection(db, 'users', uid, 'customCategories')),
   ])
 
   const profile = profSnap.exists() ? (profSnap.data() as Profile) : null
+  const portfolios: Portfolio[] = folioSnap.docs.map((d) => ({ id: d.id, ...d.data() }) as Portfolio)
 
-  const snapshots: Snapshot[] = snapsSnap.docs.map((d) => {
-    const raw = d.data()
-    return {
-      ...raw,
-      asOfDate: d.id,
-      recordedAt: ms(raw.recordedAt),
-      updatedAt: ms(raw.updatedAt),
-    } as Snapshot
+  // One query per portfolio. A collection-group query cannot be scoped to a
+  // single user's subtree without a redundant uid field on every snapshot, and
+  // nobody has enough portfolios for the fan-out to matter.
+  const timelines = await Promise.all(
+    portfolios.map((p) =>
+      getDocsFromServer(
+        query(collection(db, 'users', uid, 'portfolios', p.id, 'snapshots'), orderBy('asOfDate')),
+      ),
+    ),
+  )
+
+  const snapshots: Record<string, Snapshot[]> = {}
+  portfolios.forEach((p, i) => {
+    snapshots[p.id] = timelines[i].docs.map((d) => toSnapshot(d.id, d.data()))
   })
 
   const toCategory = (tier: Category['tier']) => (d: { id: string; data: () => any }): Category => ({
+    regions: ['GLOBAL'], // pre-migration documents carry no regions field
     id: d.id, ...d.data(), tier,
   })
 
   // Union by slug, global winning ties — so approving a proposal needs no
   // migration: the private copy is simply shadowed by the identical global one.
   const categories = mergeCategories(
-    globalSnap.docs.map(toCategory('global')),
+    globalCats,
     customSnap.docs.map(toCategory('custom')),
   )
 
-  if (profile) writePrivateCache(uid, { profile, snapshots })
+  if (profile) writePrivateCache(uid, { profile, portfolios, snapshots })
   writeCategories(categories)
 
-  return { profile, snapshots, categories }
+  return { profile, portfolios, snapshots, categories }
+}
+
+/**
+ * Read the global catalog from its single manifest document.
+ *
+ * Falls back to the collection if the manifest is missing — a project that has
+ * not run `fb:catalog` yet must still work, and a stale manifest is a worse
+ * failure than a slow read. The fallback costs one document read per category,
+ * which is what this exists to avoid, so it is a safety net rather than a path
+ * anything should sit on.
+ */
+async function loadGlobalCategories(force = false): Promise<Category[]> {
+  const db = getDb()
+
+  // Fresh copy in localStorage costs nothing at all. The catalog is the same for
+  // every user and changes rarely, so most sessions should not touch the network
+  // for it. Refresh forces past this.
+  if (!force) {
+    const cached = readCategories()
+    if (cached?.length) return cached.filter((c) => c.tier === 'global')
+  }
+
+  try {
+    const manifest = await getDocFromServer(doc(db, 'catalog', 'current'))
+    if (manifest.exists()) {
+      const data = manifest.data() as { categories: Omit<Category, 'tier'>[] }
+      return data.categories.map((c) => ({ ...c, regions: c.regions ?? ['GLOBAL'], tier: 'global' }))
+    }
+  } catch {
+    // The manifest may not be readable yet — its rule ships separately from this
+    // code. Falling back keeps the app working during that window; it just costs
+    // the reads this exists to save.
+  }
+
+  const snap = await getDocsFromServer(collection(db, 'categories'))
+  return snap.docs.map((d) => {
+    const raw = d.data() as Partial<Category>
+    // Documents written before regions existed default to everywhere.
+    return { ...raw, regions: raw.regions ?? ['GLOBAL'], id: d.id, tier: 'global' } as Category
+  })
 }
 
 export class HandleTakenError extends Error {
@@ -84,8 +145,11 @@ export class HandleTakenError extends Error {
  */
 export async function createProfile(
   uid: string,
-  opts: { handle: string; email: string; baseCurrency: string; cadenceMonths: 6 | 12 },
-): Promise<Profile> {
+  opts: {
+    handle: string; email: string; baseCurrency: string; cadenceMonths: 6 | 12
+    portfolioLabel?: string; region?: string | null
+  },
+): Promise<{ profile: Profile; portfolio: Portfolio }> {
   const db = getDb()
   const batch = writeBatch(db)
 
@@ -96,8 +160,7 @@ export async function createProfile(
   const profile: Profile = {
     handle: opts.handle,
     email: opts.email,
-    baseCurrency: opts.baseCurrency,
-    cadenceMonths: opts.cadenceMonths,
+    displayCurrency: opts.baseCurrency,
     // Must exist and be 0: the proposal quota rule reads this field, and a
     // missing field makes get().data.categoriesCreated error rather than
     // evaluate false — every proposal would fail with no obvious cause.
@@ -114,6 +177,21 @@ export async function createProfile(
     net: null, currency: opts.baseCurrency, asOfDate: null,
   })
 
+  // Every account starts with one portfolio. With a single folio the concept
+  // should be invisible; it only surfaces once a second one exists.
+  const portfolio: Portfolio = {
+    id: DEFAULT_PORTFOLIO_ID,
+    label: opts.portfolioLabel ?? 'Main',
+    region: opts.region ?? null,
+    baseCurrency: opts.baseCurrency,
+    cadenceMonths: opts.cadenceMonths,
+    order: 0,
+  }
+  const { id: _id, ...portfolioDoc } = portfolio
+  batch.set(doc(db, 'users', uid, 'portfolios', portfolio.id), {
+    ...portfolioDoc, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+  })
+
   try {
     await batch.commit()
   } catch (e) {
@@ -122,7 +200,49 @@ export async function createProfile(
     }
     throw e
   }
-  return profile
+  return { profile, portfolio }
+}
+
+export const DEFAULT_PORTFOLIO_ID = 'main'
+
+/** Create an additional portfolio. */
+export async function createPortfolio(uid: string, p: Portfolio): Promise<Portfolio> {
+  const { id, ...rest } = p
+  await setDoc(doc(getDb(), 'users', uid, 'portfolios', id), {
+    ...rest, createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+  })
+  return p
+}
+
+export async function updatePortfolio(
+  uid: string, id: string, patch: Partial<Omit<Portfolio, 'id'>>,
+): Promise<void> {
+  await updateDoc(doc(getDb(), 'users', uid, 'portfolios', id), {
+    ...patch, updatedAt: serverTimestamp(),
+  })
+}
+
+/**
+ * Delete a portfolio and its whole timeline.
+ *
+ * Its snapshots are a level deeper than the document being removed, and
+ * Firestore has no recursive delete from a client — deleting only the parent
+ * would orphan years of history somewhere unreachable and still billable.
+ */
+export async function deletePortfolio(uid: string, id: string): Promise<number> {
+  const ref = doc(getDb(), 'users', uid, 'portfolios', id)
+  const snaps = await getDocsFromServer(collection(ref, 'snapshots'))
+
+  // Snapshots first, then the portfolio itself. See deleteLevels.
+  await deleteLevels([snaps.docs.map((d) => d.ref), [ref]])
+
+  const left = await getDocsFromServer(collection(ref, 'snapshots'))
+  if (!left.empty) {
+    throw new Error(
+      `Deleted the portfolio but ${left.size} snapshot(s) remain. Re-run to finish clearing them.`,
+    )
+  }
+  return snaps.size
 }
 
 /**
@@ -137,6 +257,47 @@ function stripUndefined<T extends object>(o: T): T {
   return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as T
 }
 
+/**
+ * Change the currency the user is looking at.
+ *
+ * History is untouched: every snapshot keeps its own baseCurrency and its own
+ * frozen rate table, and the UI converts through those. So switching from INR
+ * to CAD re-expresses years of history at the rates that applied on each
+ * valuation date — it does not rewrite anything, and switching back is exact.
+ */
+export async function setDisplayCurrency(uid: string, currency: string): Promise<void> {
+  await updateDoc(doc(getDb(), 'users', uid), {
+    displayCurrency: currency, updatedAt: serverTimestamp(),
+  })
+}
+
+/**
+ * Recompute the admin-readable stats figure across every portfolio.
+ *
+ * Combined net worth blends dates by design: each portfolio contributes its most
+ * recent snapshot, and those are rarely the same day. `asOfDate` records the
+ * newest of them, so a reader knows how current the freshest input is — the
+ * dashboard shows the full provenance.
+ */
+export async function updateCombinedStats(uid: string, data: LoadedData): Promise<void> {
+  if (!data.profile) return
+  const display = data.profile.displayCurrency
+  const kinds = kindLookup(data.categories)
+
+  let net = 0
+  let newest = ''
+  for (const p of data.portfolios) {
+    const latest = data.snapshots[p.id]?.at(-1)
+    if (!latest) continue
+    net += computeTotals(latest.holdings, kinds, latest.fxRates, latest.baseCurrency, display).net
+    if (latest.asOfDate > newest) newest = latest.asOfDate
+  }
+
+  await setDoc(doc(getDb(), 'users', uid, 'stats', 'current'), {
+    net, currency: display, asOfDate: newest || null,
+  })
+}
+
 export type SnapshotDraft = Omit<Snapshot, 'recordedAt' | 'updatedAt' | 'totals'>
 
 /**
@@ -149,6 +310,7 @@ export type SnapshotDraft = Omit<Snapshot, 'recordedAt' | 'updatedAt' | 'totals'
  */
 export async function saveSnapshot(
   uid: string,
+  portfolioId: string,
   draft: SnapshotDraft,
   categories: Category[],
   existing: Snapshot[],
@@ -163,7 +325,7 @@ export async function saveSnapshot(
 
   const batch = writeBatch(db)
   batch.set(
-    doc(db, 'users', uid, 'snapshots', draft.asOfDate),
+    doc(db, 'users', uid, 'portfolios', portfolioId, 'snapshots', draft.asOfDate),
     {
       ...draft,
       holdings: draft.holdings.map(stripUndefined),
@@ -179,16 +341,14 @@ export async function saveSnapshot(
     { merge: true },
   )
 
-  // Only the newest snapshot denormalizes up to the admin-readable stats doc —
-  // editing 2024 must not make it look like this year's number.
-  if (isNewest) {
-    batch.set(doc(db, 'users', uid, 'stats', 'current'), {
-      net: totals.net, currency: draft.baseCurrency, asOfDate: draft.asOfDate,
-    })
-  }
-
   await batch.commit()
-  return hardRefresh(uid)
+
+  // The admin stats figure is now a sum across portfolios, so it cannot be
+  // computed from this one write. Refresh first, then denormalize from the
+  // complete picture.
+  const data = await hardRefresh(uid)
+  if (isNewest) await updateCombinedStats(uid, data)
+  return data
 }
 
 export class ProposalExistsError extends Error {
@@ -226,6 +386,8 @@ export async function addCustomCategory(
     proposeGlobal: boolean
     handle: string
     categoriesCreated: number
+    /** Where this instrument exists; defaults to everywhere. */
+    regions?: string[]
   },
 ): Promise<{ category: Category; proposed: boolean }> {
   const db = getDb()
@@ -235,10 +397,13 @@ export async function addCustomCategory(
   // Written first and alone, so the category is usable immediately. The flag
   // starts false and only flips if the proposal actually lands.
   await setDoc(customRef, {
-    label, kind, group, createdAt: serverTimestamp(), proposedToGlobal: false,
+    label, kind, group, regions: opts.regions ?? ['GLOBAL'],
+    createdAt: serverTimestamp(), proposedToGlobal: false,
   })
 
-  const category: Category = { id: slug, label, kind, group, tier: 'custom' }
+  const category: Category = {
+    id: slug, label, kind, group, regions: opts.regions ?? ['GLOBAL'], tier: 'custom',
+  }
   if (!opts.proposeGlobal) return { category, proposed: false }
 
   // The increment is not bookkeeping — the rules assert
@@ -379,10 +544,56 @@ export async function rejectProposal(
   })
 }
 
+
+/* ----------------------------------------------------------- deletion --- */
+
+/**
+ * Firestore allows 500 operations per batch. 400 leaves headroom so a caller
+ * that adds a couple of writes alongside a delete cannot silently cross the line.
+ */
+const BATCH_LIMIT = 400
+
+export function chunk<T>(items: T[], size = BATCH_LIMIT): T[][] {
+  const out: T[][] = []
+  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
+  return out
+}
+
+/**
+ * Delete documents deepest-first, in batches.
+ *
+ * `levels` must be ordered children before parents, and each level is fully
+ * committed before the next begins. That ordering is load-bearing for a reason
+ * specific to Firestore: **deleting a document does not delete its
+ * subcollections.** A parent removed first stops appearing in collection
+ * queries while its children carry on existing — still stored, still billed,
+ * and no longer reachable by enumeration, because the only way anything finds
+ * them is by walking down from that parent.
+ *
+ * Within a single batch order is irrelevant, since a batch is atomic. It is
+ * across batches that it matters, and anything past 400 documents is more than
+ * one batch.
+ */
+async function deleteLevels(levels: DocumentReference[][]): Promise<number> {
+  const db = getDb()
+  let deleted = 0
+
+  for (const level of levels) {
+    for (const group of chunk(level)) {
+      const batch = writeBatch(db)
+      group.forEach((ref) => batch.delete(ref))
+      await batch.commit()
+      deleted += group.length
+    }
+  }
+  return deleted
+}
+
 /* --------------------------------------------------------- account exit --- */
 
 export interface DeletionSummary {
   snapshots: number
+  portfolios?: number
   customCategories: number
   proposalsWithdrawn: number
   handleReleased: boolean
@@ -409,33 +620,155 @@ export interface DeletionSummary {
 export async function deleteAccount(uid: string, handle: string): Promise<DeletionSummary> {
   const db = getDb()
 
-  const [snaps, customs, proposals] = await Promise.all([
-    getDocsFromServer(collection(db, 'users', uid, 'snapshots')),
+  const [folios, customs, proposals] = await Promise.all([
+    getDocsFromServer(collection(db, 'users', uid, 'portfolios')),
     getDocsFromServer(collection(db, 'users', uid, 'customCategories')),
     getDocsFromServer(
       query(collection(db, 'categoryProposals'), where('proposedBy', '==', uid)),
     ),
   ])
 
-  const batch = writeBatch(db)
-  snaps.docs.forEach((d) => batch.delete(d.ref))
-  customs.docs.forEach((d) => batch.delete(d.ref))
+  // Firestore has no recursive delete from a client, and a portfolio's snapshots
+  // are a level deeper than they used to be — deleting the parent alone would
+  // orphan them, invisible and unreachable.
+  const timelines = await Promise.all(
+    folios.docs.map((d) => getDocsFromServer(collection(d.ref, 'snapshots'))),
+  )
 
   // Only pending ones: the rules refuse a decided proposal, and a rejection
   // needs to persist so the same slug cannot simply be resubmitted.
   const pending = proposals.docs.filter((d) => d.data().status === 'pending')
-  pending.forEach((d) => batch.delete(d.ref))
+  const snapshotRefs = timelines.flatMap((t) => t.docs.map((d) => d.ref))
 
-  batch.delete(doc(db, 'users', uid, 'stats', 'current'))
-  batch.delete(doc(db, 'handles', handle))
-  batch.delete(doc(db, 'users', uid))
+  // Strictly deepest-first. The profile document goes last of all: while it
+  // exists the account is still coherent and a failed run can simply be
+  // repeated, whereas removing it early would strand everything beneath it.
+  await deleteLevels([
+    snapshotRefs,
+    [
+      ...folios.docs.map((d) => d.ref),
+      ...customs.docs.map((d) => d.ref),
+      ...pending.map((d) => d.ref),
+      doc(db, 'users', uid, 'stats', 'current'),
+    ],
+    [doc(db, 'handles', handle)],
+    [doc(db, 'users', uid)],
+  ])
 
-  await batch.commit()
+  await assertNothingLeft(uid)
 
   return {
-    snapshots: snaps.size,
+    snapshots: snapshotRefs.length,
     customCategories: customs.size,
     proposalsWithdrawn: pending.length,
     handleReleased: true,
   }
+}
+
+/**
+ * Re-read the account after deletion and fail loudly if anything survived.
+ *
+ * "Delete my account" is a promise, and the one failure mode worth catching is
+ * the quiet one — a subcollection left behind that no screen will ever show
+ * again. Better a visible error the user can act on than a clean-looking
+ * success hiding residue.
+ */
+async function assertNothingLeft(uid: string): Promise<void> {
+  const db = getDb()
+  const folios = await getDocsFromServer(collection(db, 'users', uid, 'portfolios'))
+
+  const leftovers: string[] = []
+  if (!folios.empty) leftovers.push(`${folios.size} portfolio(s)`)
+
+  for (const f of folios.docs) {
+    const snaps = await getDocsFromServer(collection(f.ref, 'snapshots'))
+    if (!snaps.empty) leftovers.push(`${snaps.size} snapshot(s) under ${f.id}`)
+  }
+
+  const customs = await getDocsFromServer(collection(db, 'users', uid, 'customCategories'))
+  if (!customs.empty) leftovers.push(`${customs.size} custom categor(ies)`)
+
+  if (leftovers.length) {
+    throw new Error(`Deletion incomplete — ${leftovers.join(', ')} remain. Run it again to finish.`)
+  }
+}
+
+/**
+ * Restore a backup.
+ *
+ * `mode` decides what happens to dates that already exist:
+ *   'skip'      leave what is there — nothing is ever destroyed
+ *   'overwrite' the file wins for the dates it contains, others are untouched
+ *
+ * There is deliberately no "wipe everything first" mode. A restore that empties
+ * the account before writing has a window where a mid-flight failure leaves
+ * nothing at all, and the delete-account flow already exists for people who
+ * genuinely want to start over.
+ */
+export async function importBackup(
+  uid: string,
+  backup: Backup,
+  mode: 'skip' | 'overwrite',
+  existingSnapshots: Record<string, { asOfDate: string }[]>,
+): Promise<{ portfolios: number; snapshots: number; skipped: number }> {
+  const db = getDb()
+  const batch = writeBatch(db)
+  let written = 0
+  let skipped = 0
+
+  for (const p of backup.portfolios) {
+    const { id, ...rest } = p
+    // merge:true so restoring into an existing folio does not clobber a cadence
+    // or label the user has since changed.
+    batch.set(doc(db, 'users', uid, 'portfolios', id), { ...rest, updatedAt: serverTimestamp() }, { merge: true })
+
+    const present = new Set((existingSnapshots[id] ?? []).map((s) => s.asOfDate))
+    for (const snap of backup.snapshots[id] ?? []) {
+      if (mode === 'skip' && present.has(snap.asOfDate)) { skipped += 1; continue }
+      // asOfDate becomes the document id; both timestamps are re-stamped below.
+      const { asOfDate, recordedAt, updatedAt: _updatedAt, ...body } = snap
+      batch.set(doc(db, 'users', uid, 'portfolios', id, 'snapshots', asOfDate), {
+        ...body,
+        // Preserve when it was originally recorded; stamp the restore itself.
+        recordedAt: recordedAt ? Timestamp.fromMillis(recordedAt) : serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+      written += 1
+    }
+  }
+
+  await batch.commit()
+  return { portfolios: backup.portfolios.length, snapshots: written, skipped }
+}
+
+export interface MyProposal {
+  id: string
+  label: string
+  status: 'pending' | 'approved' | 'rejected'
+  rejectionReason?: string
+}
+
+/**
+ * The user's own suggestions and how they were ruled on.
+ *
+ * Rules let a proposer read their own proposals, so this needs no admin rights.
+ * Without it, suggesting a category was a write into silence — no way to learn
+ * whether it was approved, rejected, or never looked at.
+ */
+export async function loadMyProposals(uid: string): Promise<MyProposal[]> {
+  const db = getDb()
+  const snap = await getDocsFromServer(
+    query(collection(db, 'categoryProposals'), where('proposedBy', '==', uid)),
+  )
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as MyProposal)
+}
+
+/** Withdraw a suggestion that has not been ruled on yet. */
+export async function withdrawProposal(slug: string): Promise<void> {
+  await deleteDoc(doc(getDb(), 'categoryProposals', slug))
+}
+
+/** Remove one of your own private categories. */
+export async function deleteCustomCategory(uid: string, slug: string): Promise<void> {
+  await deleteDoc(doc(getDb(), 'users', uid, 'customCategories', slug))
 }

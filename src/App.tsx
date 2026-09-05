@@ -1,31 +1,33 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { useSession } from './hooks/useSession'
 import { logout } from './lib/auth'
-import { fetchCurrencies } from './lib/fx'
-import { formatMoney } from './lib/money'
+import { fetchCurrencies, orderCurrencies } from './lib/fx'
 import SignIn from './views/SignIn'
 import Onboarding from './views/Onboarding'
 import Setup from './views/Setup'
 import SnapshotEditor from './views/SnapshotEditor'
 import Footer from './components/Footer'
+import Money from './components/Money'
 // Recharts is ~150 kB gzipped and renders only once a snapshot exists, so it
 // stays out of the sign-in path entirely.
-const Breakup = lazy(() => import('./components/Breakup'))
-const Growth = lazy(() => import('./components/Growth'))
-const DeltaTable = lazy(() => import('./components/DeltaTable'))
 
 // Dev-only chart harness (`?charts`). The ternary is what actually removes it:
 // a bare `lazy(() => import(...))` at module scope still emits the chunk even
 // when nothing reaches it, because the dynamic import is not inside the branch
 // that import.meta.env.DEV constant-folds away.
-// Ships in production: the whole point is a link that can be handed to someone.
-const DemoApp = lazy(() => import('./demo/DemoApp'))
 const Admin = lazy(() => import('./views/Admin'))
 const DeleteAccount = lazy(() => import('./views/DeleteAccount'))
+const PortfolioView = lazy(() => import('./views/PortfolioView'))
+const Portfolios = lazy(() => import('./views/Portfolios'))
+const CombinedSummary = lazy(() => import('./components/CombinedSummary'))
+const Categories = lazy(() => import('./views/Categories'))
+const ImportBackup = lazy(() => import('./views/ImportBackup'))
 import { useAdmin } from './hooks/useAdmin'
 import { useRedacted } from './hooks/useRedacted'
 import { buildBackup, downloadBackup, monthsUntilDue } from './lib/export'
-import { addCustomCategory, saveSnapshot } from './lib/repo'
+import { availableDisplayCurrencies, combineTotals, kindLookup, snapshotAsOf } from './lib/calc'
+import PortfolioCard from './components/PortfolioCard'
+import { addCustomCategory, saveSnapshot, setDisplayCurrency } from './lib/repo'
 import type { Snapshot } from './lib/types'
 
 function ago(ms: number): string {
@@ -38,7 +40,11 @@ function ago(ms: number): string {
 
 type View =
   | { name: 'dashboard' }
-  | { name: 'editor'; editing?: Snapshot }
+  | { name: 'portfolio'; id: string }
+  | { name: 'portfolios' }
+  | { name: 'editor'; portfolioId: string; editing?: Snapshot }
+  | { name: 'categories' }
+  | { name: 'import' }
   | { name: 'admin' }
   | { name: 'delete' }
 
@@ -47,24 +53,12 @@ export default function App() {
   const [view, setView] = useState<View>({ name: 'dashboard' })
   const [currencies, setCurrencies] = useState<Record<string, string>>({})
   const [redacted, toggleRedacted] = useRedacted()
-  const [demo] = useState(() => new URLSearchParams(location.search).has('demo'))
   const isAdmin = useAdmin(session.status === 'ready' ? session.user : null)
 
   useEffect(() => {
     // Never rejects — falls back through localStorage to a hardcoded table.
     void fetchCurrencies().then(setCurrencies)
   }, [])
-
-  // ?demo runs entirely in memory and touches no backend, so it is checked
-  // before the auth state machine — it works even in a build with no Firebase
-  // credentials at all.
-  if (demo) {
-    return (
-      <Suspense fallback={<div className="centered"><p className="dim">Loading demo…</p></div>}>
-        <DemoApp onExit={() => { location.search = '' }} />
-      </Suspense>
-    )
-  }
 
   switch (session.status) {
     case 'unconfigured':
@@ -105,13 +99,36 @@ export default function App() {
       )
 
     case 'ready': {
-      const { profile, snapshots, categories, fetchedAt, user } = session
-      const latest = snapshots.at(-1)
+      const { profile, portfolios, snapshots: byFolio, categories, fetchedAt, user } = session
+      const display = profile.displayCurrency
+      const kinds = kindLookup(categories)
+
+      if (!portfolios.length) {
+        return (
+          <div className="centered">
+            <div className="panel">
+              <h1>Setting things up</h1>
+              <p className="dim small">
+                This account predates portfolios and has not been migrated yet.
+                Its data is safe and untouched.
+              </p>
+              <button onClick={() => void refresh()} disabled={refreshing} style={{ marginTop: 12 }}>
+                {refreshing ? 'Checking…' : 'Check again'}
+              </button>
+            </div>
+          </div>
+        )
+      }
+
+      const allSnapshots = Object.values(byFolio).flat()
+      const reachable = availableDisplayCurrencies(allSnapshots)
+      const combined = combineTotals(portfolios, byFolio, kinds, display)
+      const back = () => setView({ name: 'dashboard' })
 
       if (view.name === 'admin' && isAdmin) {
         return (
           <Suspense fallback={<div className="centered"><p className="dim">Loading…</p></div>}>
-            <Admin user={user} onBack={() => setView({ name: 'dashboard' })} />
+            <Admin user={user} onBack={back} />
           </Suspense>
         )
       }
@@ -120,44 +137,123 @@ export default function App() {
         return (
           <Suspense fallback={<div className="centered"><p className="dim">Loading…</p></div>}>
             <DeleteAccount
-              user={user} profile={profile} snapshots={snapshots} categories={categories}
-              onCancel={() => setView({ name: 'dashboard' })}
+              user={user} profile={profile} portfolios={portfolios}
+              snapshots={byFolio} categories={categories} onCancel={back}
+            />
+          </Suspense>
+        )
+      }
+
+      if (view.name === 'categories') {
+        return (
+          <Suspense fallback={<div className="centered"><p className="dim">Loading…</p></div>}>
+            <Categories
+              uid={user.uid} categories={categories} portfolios={portfolios}
+              snapshots={byFolio} onChanged={() => void refresh()} onBack={back}
+            />
+          </Suspense>
+        )
+      }
+
+      if (view.name === 'import') {
+        return (
+          <Suspense fallback={<div className="centered"><p className="dim">Loading…</p></div>}>
+            <ImportBackup
+              uid={user.uid} portfolios={portfolios} snapshots={byFolio}
+              onDone={() => { setView({ name: 'dashboard' }); void refresh() }}
+              onCancel={back}
+            />
+          </Suspense>
+        )
+      }
+
+      if (view.name === 'portfolios') {
+        return (
+          <Suspense fallback={<div className="centered"><p className="dim">Loading…</p></div>}>
+            <Portfolios
+              uid={user.uid} portfolios={portfolios} timelines={byFolio}
+              currencies={currencies} onChanged={() => void refresh()} onBack={back}
+            />
+          </Suspense>
+        )
+      }
+
+      if (view.name === 'portfolio') {
+        const p = portfolios.find((x) => x.id === view.id)
+        if (!p) { setView({ name: 'dashboard' }); return null }
+        return (
+          <Suspense fallback={<div className="centered"><p className="dim">Loading…</p></div>}>
+            <PortfolioView
+              portfolio={p} timeline={byFolio[p.id] ?? []} categories={categories}
+              displayCurrency={display} onBack={back}
+              onEdit={(s) => setView({ name: 'editor', portfolioId: p.id, editing: s })}
+              onNew={() => setView({ name: 'editor', portfolioId: p.id })}
             />
           </Suspense>
         )
       }
 
       if (view.name === 'editor') {
+        const p = portfolios.find((x) => x.id === view.portfolioId)
+        if (!p) { setView({ name: 'dashboard' }); return null }
+        const timeline = byFolio[p.id] ?? []
         return (
           <SnapshotEditor
-            profile={profile}
-            snapshots={snapshots}
+            portfolio={p}
+            snapshots={timeline}
             categories={categories}
             currencies={currencies}
             editing={view.editing}
             persistence={{
-              saveSnapshot: (draft, cats) => saveSnapshot(user.uid, draft, cats, snapshots),
+              saveSnapshot: (draft, cats) =>
+                saveSnapshot(user.uid, p.id, draft, cats, timeline)
+                  .then((d) => ({ snapshots: d.snapshots[p.id] ?? [], categories: d.categories })),
               createCategory: async (c) => (await addCustomCategory(user.uid, {
                 ...c, handle: profile.handle, categoriesCreated: profile.categoriesCreated,
               })).category,
             }}
-            onCancel={() => setView({ name: 'dashboard' })}
+            onCancel={() => setView({ name: 'portfolio', id: p.id })}
             onSaved={(data) => {
-              setSession({ ...session, ...data, fetchedAt: Date.now() })
-              setView({ name: 'dashboard' })
+              setSession({
+                ...session,
+                snapshots: { ...byFolio, [p.id]: data.snapshots },
+                categories: data.categories,
+                fetchedAt: Date.now(),
+              })
+              setView({ name: 'portfolio', id: p.id })
             }}
           />
         )
       }
 
+      const overdue = portfolios.filter((p) => {
+        const latest = snapshotAsOf(byFolio[p.id] ?? [])
+        return latest && monthsUntilDue(latest.asOfDate, p.cadenceMonths) <= 0
+      })
+
       return (
         <div className="app">
-          <header className="spread" style={{ marginBottom: 24 }}>
+          <header className="spread" style={{ marginBottom: 20, flexWrap: 'wrap', gap: 12 }}>
             <div>
               <h1>Net Worth Calculator</h1>
-              <p className="dim small" style={{ margin: 0 }}>
-                @{profile.handle} · reporting in {profile.baseCurrency} ·{' '}
-                {categories.length} categories
+              <p className="dim small toolbar" style={{ margin: 0 }}>
+                <span>@{profile.handle} · showing</span>
+                {/* Each snapshot converts through its own frozen rates, so this
+                    re-expresses every folio's whole history, not just today. */}
+                <select
+                  value={display}
+                  aria-label="Display currency"
+                  style={{ width: 'auto', padding: '2px 6px', fontSize: 13 }}
+                  onChange={(e) => {
+                    const next = e.target.value
+                    setSession({ ...session, profile: { ...profile, displayCurrency: next } })
+                    void setDisplayCurrency(user.uid, next)
+                  }}
+                >
+                  {orderCurrencies(currencies, display)
+                    .filter((c) => !allSnapshots.length || reachable.includes(c.code))
+                    .map((c) => <option key={c.code} value={c.code}>{c.code}</option>)}
+                </select>
               </p>
             </div>
             <div className="stack-sm" style={{ textAlign: 'right' }}>
@@ -165,101 +261,83 @@ export default function App() {
                 <button onClick={() => void refresh()} disabled={refreshing}>
                   {refreshing ? 'Refreshing…' : 'Refresh'}
                 </button>
-                <button className="btn-primary" onClick={() => setView({ name: 'editor' })}>
-                  {latest ? 'New snapshot' : 'Add your first snapshot'}
-                </button>
+                <button onClick={() => setView({ name: 'portfolios' })}>Portfolios</button>
+                <button onClick={() => setView({ name: 'categories' })}>Categories</button>
               </div>
-              {/* Tab-scoped cache, so "open in new tab" is a silent path to
-                  stale numbers. Keep the age visible, not tucked away. */}
               <div className="dim small">Updated {ago(fetchedAt)}</div>
             </div>
           </header>
 
-          {latest && (() => {
-            const months = monthsUntilDue(latest.asOfDate, profile.cadenceMonths)
-            if (months > 0.5) return null
-            return (
-              <div className="banner">
-                {months <= 0
-                  ? <>Your last snapshot is from <strong>{latest.asOfDate}</strong> — an update is due.</>
-                  : <>Next update due in about {Math.round(months * 4.3)} weeks.</>}
-              </div>
-            )
-          })()}
+          {overdue.length > 0 && (
+            <div className="banner">
+              An update is due for{' '}
+              <strong>{overdue.map((p) => p.label).join(', ')}</strong>.
+            </div>
+          )}
 
           <div className="card" style={{ marginBottom: 16 }}>
-            {latest ? (
-              <>
-                <h2>Net worth</h2>
-                <p className="num" style={{ fontSize: 32, margin: '0 0 4px' }}>
-                  {formatMoney(latest.totals.net, latest.baseCurrency)}
-                </p>
-                <p className="dim small" style={{ margin: 0 }}>
-                  as of {latest.asOfDate} · {latest.holdings.length} holdings ·
-                  assets {formatMoney(latest.totals.assets, latest.baseCurrency)} ·
-                  liabilities {formatMoney(latest.totals.liabilities, latest.baseCurrency)}
-                </p>
-              </>
-            ) : (
-              <>
-                <h2>No snapshots yet</h2>
-                <p className="dim small" style={{ margin: 0 }}>
-                  Record what you own and owe today. Growth charts need two
-                  snapshots, so backdating an older one is worth the ten minutes.
-                </p>
-              </>
+            <h2>Net worth</h2>
+            <p className="num" style={{ fontSize: 32, margin: '0 0 4px' }}>
+              <Money amount={combined.net} currency={display} />
+            </p>
+            <p className="dim small" style={{ margin: 0 }}>
+              assets <Money amount={combined.assets} currency={display} /> ·
+              liabilities <Money amount={combined.liabilities} currency={display} />
+            </p>
+            {/* Portfolios are valued on their own schedules, so a combined figure
+                usually blends dates. Saying which is what makes it honest rather
+                than falsely precise. */}
+            {combined.blended && (
+              <p className="dim small" style={{ margin: '8px 0 0' }}>
+                Blended:{' '}
+                {portfolios
+                  .filter((p) => combined.provenance[p.id])
+                  .map((p) => `${p.label} as of ${combined.provenance[p.id]}`)
+                  .join(' · ')}
+              </p>
             )}
           </div>
 
-          {latest && (
-            <Suspense fallback={<div className="card dim small">Loading charts…</div>}>
-              <div style={{ display: 'grid', gap: 16, marginBottom: 16 }}>
-                <Breakup snapshot={latest} categories={categories} />
-                <Growth snapshots={snapshots} categories={categories} />
-                <DeltaTable snapshots={snapshots} categories={categories} />
+          {/* Hidden with a single folio: it would restate the card below it, and
+              someone who never adds a second should not meet the concept. */}
+          {portfolios.length > 1 && (
+            <Suspense fallback={<div className="card dim small">Loading…</div>}>
+              <div style={{ marginBottom: 16 }}>
+                <CombinedSummary
+                  portfolios={portfolios} timelines={byFolio}
+                  categories={categories} displayCurrency={display}
+                />
               </div>
             </Suspense>
           )}
 
-          {snapshots.length > 0 && (
-            <div className="card" style={{ marginBottom: 16 }}>
-              <h2>History</h2>
-              <ul className="checklist">
-                {[...snapshots].reverse().map((s) => (
-                  <li key={s.asOfDate}>
-                    <span style={{ flex: 1 }}>
-                      <strong>{s.asOfDate}</strong>
-                      {s.note && <span className="dim"> · {s.note}</span>}
-                    </span>
-                    <span className="num">{formatMoney(s.totals.net, s.baseCurrency)}</span>
-                    <button
-                      onClick={() => setView({ name: 'editor', editing: s })}
-                      style={{ padding: '2px 10px', fontSize: 13 }}
-                    >
-                      Edit
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
+          <div className="grid-cards" style={{ marginBottom: 16 }}>
+            {portfolios.map((p) => (
+              <PortfolioCard
+                key={p.id} portfolio={p} timeline={byFolio[p.id] ?? []}
+                kinds={kinds} displayCurrency={display}
+                onOpen={() => setView({ name: 'portfolio', id: p.id })}
+                onUpdate={() => setView({ name: 'editor', portfolioId: p.id })}
+              />
+            ))}
+          </div>
 
           <div className="toolbar" style={{ marginTop: 4 }}>
             <button onClick={toggleRedacted} title="Blur every figure on screen">
               {redacted ? 'Show amounts' : 'Hide amounts'}
             </button>
             <button
-              disabled={!snapshots.length}
-              onClick={() => downloadBackup(buildBackup(profile, snapshots, categories))}
+              disabled={!allSnapshots.length}
+              onClick={() => downloadBackup(buildBackup(profile, portfolios, byFolio, categories))}
               title="A year of snapshots cannot be reconstructed — keep a copy"
             >
               Export JSON
             </button>
+            <button onClick={() => setView({ name: 'import' })}>Restore</button>
             {isAdmin && <button onClick={() => setView({ name: 'admin' })}>Admin</button>}
             <button
               onClick={() => setView({ name: 'delete' })}
               style={{ color: 'var(--negative)' }}
-              title="Permanently delete your account and every snapshot"
             >
               Delete account
             </button>

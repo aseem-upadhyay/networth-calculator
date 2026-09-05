@@ -1,5 +1,5 @@
-import { convertToBase, MissingRateError } from './money'
-import type { Category, FxRates, Holding, Snapshot, Totals } from './types'
+import { convertBetween, MissingRateError } from './money'
+import type { Category, FxRates, Holding, Portfolio, Snapshot, Totals } from './types'
 
 /** Parse YYYY-MM-DD as UTC midnight. Local parsing drifts by a day west of Greenwich. */
 export function parseDate(iso: string): number {
@@ -17,7 +17,7 @@ export function cagr(start: number, end: number, days: number): number | null {
   return Math.pow(end / start, 365 / days) - 1
 }
 
-type Kinds = Map<string, Category['kind']>
+export type Kinds = Map<string, Category['kind']>
 
 export function kindLookup(categories: Category[]): Kinds {
   return new Map(categories.map((c) => [c.id, c.kind]))
@@ -35,11 +35,13 @@ export function computeTotals(
   kinds: Kinds,
   rates: FxRates,
   baseCurrency: string,
+  /** Report in this currency instead. Defaults to the snapshot's own base. */
+  displayCurrency: string = baseCurrency,
 ): Totals {
   let assets = 0
   let liabilities = 0
   for (const h of holdings) {
-    const value = convertToBase(h.amount, h.currency, rates, baseCurrency)
+    const value = convertBetween(h.amount, h.currency, displayCurrency, rates, baseCurrency)
     if (kinds.get(h.categoryId) === 'liability') liabilities += value
     else assets += value
   }
@@ -55,13 +57,20 @@ function convertOrFallback(
   h: Holding,
   rates: FxRates,
   fallback: FxRates,
-  baseCurrency: string,
+  rateBase: string,
+  displayCurrency: string,
 ): { value: number; exact: boolean } {
   try {
-    return { value: convertToBase(h.amount, h.currency, rates, baseCurrency), exact: true }
+    return {
+      value: convertBetween(h.amount, h.currency, displayCurrency, rates, rateBase),
+      exact: true,
+    }
   } catch (e) {
     if (!(e instanceof MissingRateError)) throw e
-    return { value: convertToBase(h.amount, h.currency, fallback, baseCurrency), exact: false }
+    return {
+      value: convertBetween(h.amount, h.currency, displayCurrency, fallback, rateBase),
+      exact: false,
+    }
   }
 }
 
@@ -101,11 +110,19 @@ export interface CategoryDelta {
  * period total, so their real timing is unknown; this is the standard
  * approximation and should be labelled as one in the UI.
  */
-export function computeDeltas(prev: Snapshot, curr: Snapshot): CategoryDelta[] {
-  const base = curr.baseCurrency
+export function computeDeltas(
+  prev: Snapshot,
+  curr: Snapshot,
+  displayCurrency?: string,
+): CategoryDelta[] {
+  // Each snapshot converts through its OWN frozen table, so a history that
+  // switched reporting currency partway still reports correctly — the table a
+  // snapshot saved never contains its own base, which is why this cannot go
+  // through convertToBase.
+  const base = displayCurrency ?? curr.baseCurrency
   const startByCat = new Map<string, number>()
   for (const h of prev.holdings) {
-    const v = convertToBase(h.amount, h.currency, prev.fxRates, prev.baseCurrency)
+    const v = convertBetween(h.amount, h.currency, base, prev.fxRates, prev.baseCurrency)
     startByCat.set(h.categoryId, (startByCat.get(h.categoryId) ?? 0) + v)
   }
 
@@ -116,13 +133,15 @@ export function computeDeltas(prev: Snapshot, curr: Snapshot): CategoryDelta[] {
     seen.add(h.categoryId)
     const start = startByCat.get(h.categoryId) ?? 0
 
-    const end = convertToBase(h.amount, h.currency, curr.fxRates, base)
-    const contributed = convertToBase(h.contributed, h.currency, curr.fxRates, base)
+    const end = convertBetween(h.amount, h.currency, base, curr.fxRates, curr.baseCurrency)
+    const contributed = convertBetween(
+      h.contributed, h.currency, base, curr.fxRates, curr.baseCurrency,
+    )
 
     // Same holding valued at the *previous* snapshot's rates: strips FX movement.
-    const atStart = convertOrFallback(h, prev.fxRates, curr.fxRates, base)
+    const atStart = convertOrFallback(h, prev.fxRates, curr.fxRates, prev.baseCurrency, base)
     const contribAtStart = convertOrFallback(
-      { ...h, amount: h.contributed }, prev.fxRates, curr.fxRates, base,
+      { ...h, amount: h.contributed }, prev.fxRates, curr.fxRates, prev.baseCurrency, base,
     )
 
     const change = end - start
@@ -174,13 +193,13 @@ export interface SeriesPoint {
  */
 export function buildSeries(
   snapshots: Snapshot[],
-  opts: { constantCurrency?: boolean } = {},
+  opts: { constantCurrency?: boolean; displayCurrency?: string } = {},
 ): { points: SeriesPoint[]; categoryIds: string[]; exact: boolean } {
   if (snapshots.length === 0) return { points: [], categoryIds: [], exact: true }
 
   const ordered = [...snapshots].sort((a, b) => a.asOfDate.localeCompare(b.asOfDate))
   const latest = ordered[ordered.length - 1]
-  const base = latest.baseCurrency
+  const base = opts.displayCurrency ?? latest.baseCurrency
   const ids = new Set<string>()
   let exact = true
 
@@ -188,12 +207,13 @@ export function buildSeries(
     // Constant currency revalues every snapshot at the newest rates, so the chart
     // shows what the holdings did rather than what the currency did.
     const rates = opts.constantCurrency ? latest.fxRates : snap.fxRates
+    const rateBase = opts.constantCurrency ? latest.baseCurrency : snap.baseCurrency
     const fallback = snap.fxRates
 
     const point: SeriesPoint = { asOfDate: snap.asOfDate, t: parseDate(snap.asOfDate), net: 0 }
     let net = 0
     for (const h of snap.holdings) {
-      const { value, exact: ok } = convertOrFallback(h, rates, fallback, base)
+      const { value, exact: ok } = convertOrFallback(h, rates, fallback, rateBase, base)
       if (!ok) exact = false
       ids.add(h.categoryId)
       point[h.categoryId] = ((point[h.categoryId] as number) ?? 0) + value
@@ -209,4 +229,163 @@ export function buildSeries(
   }
 
   return { points, categoryIds, exact }
+}
+
+/**
+ * Currencies every snapshot can actually be expressed in.
+ *
+ * A display currency has to be reachable from *each* snapshot's own frozen
+ * table, and those tables differ — BGN is in a 2024 table and gone from a 2026
+ * one, because Bulgaria joined the euro. Offering a currency one snapshot
+ * cannot reach throws MissingRateError mid-render and takes the page down, so
+ * the intersection is computed and the picker is limited to it. The failure is
+ * removed rather than caught.
+ */
+export function availableDisplayCurrencies(snapshots: Snapshot[]): string[] {
+  if (snapshots.length === 0) return []
+
+  const reachable = (s: Snapshot) => new Set([s.baseCurrency, ...Object.keys(s.fxRates)])
+  let common = reachable(snapshots[0])
+  for (const s of snapshots.slice(1)) {
+    const next = reachable(s)
+    common = new Set([...common].filter((c) => next.has(c)))
+  }
+  return [...common].sort()
+}
+
+/* ------------------------------------------------- across portfolios --- */
+
+export interface CombinedTotals extends Totals {
+  /** portfolioId -> the asOfDate that actually contributed. */
+  provenance: Record<string, string>
+  /** The newest contributing date, i.e. how current the freshest input is. */
+  asOfDate: string | null
+  /** True when contributing snapshots do not share a date. */
+  blended: boolean
+}
+
+/** The most recent snapshot at or before `date`, or the latest if no date given. */
+export function snapshotAsOf(timeline: Snapshot[], date?: string): Snapshot | undefined {
+  if (!date) return timeline.at(-1)
+  let found: Snapshot | undefined
+  for (const s of timeline) {
+    if (s.asOfDate > date) break
+    found = s
+  }
+  return found
+}
+
+/**
+ * Sum every portfolio into one figure.
+ *
+ * Each portfolio contributes its most recent snapshot at or before `date`, and
+ * those are rarely the same day — India valued in March alongside a US folio
+ * valued in September. That blending is not an artefact of the design; it is the
+ * actual state of the user's knowledge. `provenance` records which date each
+ * folio contributed so the UI can say so out loud rather than presenting a
+ * single confident number.
+ *
+ * A portfolio with no snapshot at or before the date contributes nothing — it
+ * did not exist yet, which is different from being worth zero.
+ */
+export function combineTotals(
+  portfolios: Portfolio[],
+  timelines: Record<string, Snapshot[]>,
+  kinds: Kinds,
+  displayCurrency: string,
+  date?: string,
+): CombinedTotals {
+  let assets = 0
+  let liabilities = 0
+  const provenance: Record<string, string> = {}
+
+  for (const p of portfolios) {
+    const snap = snapshotAsOf(timelines[p.id] ?? [], date)
+    if (!snap) continue
+    const t = computeTotals(snap.holdings, kinds, snap.fxRates, snap.baseCurrency, displayCurrency)
+    assets += t.assets
+    liabilities += t.liabilities
+    provenance[p.id] = snap.asOfDate
+  }
+
+  const dates = Object.values(provenance)
+  return {
+    assets,
+    liabilities,
+    net: assets - liabilities,
+    provenance,
+    asOfDate: dates.length ? dates.reduce((a, b) => (a > b ? a : b)) : null,
+    blended: new Set(dates).size > 1,
+  }
+}
+
+export interface CombinedPoint {
+  asOfDate: string
+  t: number
+  net: number
+  /** portfolioId -> that folio's contribution at this date. */
+  [portfolioId: string]: string | number
+}
+
+/**
+ * A combined timeline across portfolios.
+ *
+ * The x values are the union of every portfolio's own dates, and at each one a
+ * folio contributes its most recent snapshot at or before it. The result is a
+ * step function that jumps whenever *any* portfolio is updated — a truthful
+ * picture of when knowledge changed, rather than a smooth line implying
+ * continuous observation that never happened.
+ *
+ * Note this is for totals and allocation only. The contributions / FX / return
+ * split stays per-portfolio: computing it across these steps would attribute one
+ * folio's update to another folio's period.
+ */
+export function buildCombinedSeries(
+  portfolios: Portfolio[],
+  timelines: Record<string, Snapshot[]>,
+  kinds: Kinds,
+  displayCurrency: string,
+): CombinedPoint[] {
+  const dates = [
+    ...new Set(portfolios.flatMap((p) => (timelines[p.id] ?? []).map((s) => s.asOfDate))),
+  ].sort()
+
+  return dates.map((d) => {
+    const point: CombinedPoint = { asOfDate: d, t: parseDate(d), net: 0 }
+    let net = 0
+    for (const p of portfolios) {
+      const snap = snapshotAsOf(timelines[p.id] ?? [], d)
+      const value = snap
+        ? computeTotals(snap.holdings, kinds, snap.fxRates, snap.baseCurrency, displayCurrency).net
+        : 0
+      point[p.id] = value
+      net += value
+    }
+    point.net = net
+    return point
+  })
+}
+
+/**
+ * Recompute a snapshot's totals and report whether the stored figures agree.
+ *
+ * Totals are denormalized at save time, so a stored value can drift from the
+ * holdings it claims to summarise — a buggy write, a hand-edited document, a
+ * fixture that never computed them. PLAN.md §3 asked for this check and its
+ * absence is exactly what let a zero headline render beside a populated chart.
+ */
+export function verifyTotals(
+  snapshot: Snapshot,
+  kinds: Kinds,
+  displayCurrency?: string,
+): { totals: Totals; storedAgrees: boolean } {
+  const totals = computeTotals(
+    snapshot.holdings, kinds, snapshot.fxRates, snapshot.baseCurrency,
+    displayCurrency ?? snapshot.baseCurrency,
+  )
+  const sameCurrency = (displayCurrency ?? snapshot.baseCurrency) === snapshot.baseCurrency
+  const storedAgrees = sameCurrency
+    ? Math.abs(snapshot.totals.net - totals.net) < 1
+    : true // not comparable across currencies; the stored value is in the folio's own base
+  return { totals, storedAgrees }
 }

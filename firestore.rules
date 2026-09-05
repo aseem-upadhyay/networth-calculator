@@ -39,14 +39,30 @@ service cloud.firestore {
         && d.label is string && d.label.size() >= 2 && d.label.size() <= 40
         && d.kind in ['asset', 'liability']
         && d.group in ['equity', 'debt', 'cash', 'real-estate',
-                       'commodity', 'alternative', 'liability'];
+                       'commodity', 'alternative', 'liability']
+        // Where the instrument exists: 'GLOBAL' or ISO country codes. Bounded so
+        // the field cannot become a dumping ground on a world-readable document.
+        && d.regions is list && d.regions.size() >= 1 && d.regions.size() <= 8;
     }
 
     match /users/{uid} {
       allow read, write: if isSignedIn() && request.auth.uid == uid;
 
+      // Legacy path. Kept readable/writable until the portfolio migration has
+      // run everywhere; delete this block once it has.
       match /snapshots/{snapshotId} {
         allow read, write: if isSignedIn() && request.auth.uid == uid;
+      }
+
+      match /portfolios/{portfolioId} {
+        allow read, write: if isSignedIn() && request.auth.uid == uid;
+
+        // Each portfolio keeps its own timeline, which is the whole point of
+        // the structure: India can be updated in March without asserting
+        // anything about the US in March.
+        match /snapshots/{snapshotId} {
+          allow read, write: if isSignedIn() && request.auth.uid == uid;
+        }
       }
 
       match /customCategories/{slug} {
@@ -83,6 +99,18 @@ service cloud.firestore {
       allow delete: if isSignedIn() && resource.data.uid == request.auth.uid;
     }
 
+    // A single denormalized projection of /categories.
+    //
+    // Reading the collection cost one document read per category — 41 of the ~46
+    // reads a session made, for a list identical for every user that changes
+    // perhaps monthly. This is the same data in one document, so a session pays
+    // one read instead of forty-one. /categories remains the source of truth;
+    // this is rebuilt from it by `npm run fb:catalog`.
+    match /catalog/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
     // Global catalog: readable by any signed-in user, ADMIN-WRITE-ONLY.
     // With no user path in, the abuse surface the quota once guarded is gone.
     match /categories/{categoryId} {
@@ -100,7 +128,7 @@ service cloud.firestore {
         && quotaBumped()
         && validCategory(categoryId, request.resource.data)
         && request.resource.data.keys().hasOnly(
-             ['label', 'kind', 'group', 'proposedBy', 'proposedByHandle',
+             ['label', 'kind', 'group', 'regions', 'proposedBy', 'proposedByHandle',
               'proposedAt', 'status'])
         && request.resource.data.proposedBy == request.auth.uid
         && request.resource.data.proposedByHandle is string

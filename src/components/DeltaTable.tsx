@@ -3,6 +3,7 @@ import { computeDeltas, daysBetween } from '../lib/calc'
 import { formatMoney, formatPercent } from '../lib/money'
 import { groupColor } from '../lib/palette'
 import { useDarkMode } from '../hooks/useDarkMode'
+import Money from './Money'
 import type { Category, Snapshot } from '../lib/types'
 
 const sign = (v: number) => (v > 0.5 ? 'pos' : v < -0.5 ? 'neg' : '')
@@ -24,10 +25,11 @@ const sign = (v: number) => (v > 0.5 ? 'pos' : v < -0.5 ? 'neg' : '')
  * number carried by a chart colour appears here as text.
  */
 export default function DeltaTable({
-  snapshots, categories,
+  snapshots, categories, displayCurrency,
 }: {
   snapshots: Snapshot[]
   categories: Category[]
+  displayCurrency?: string
 }) {
   const dark = useDarkMode()
   const [prev, curr] = [snapshots.at(-2), snapshots.at(-1)]
@@ -35,7 +37,7 @@ export default function DeltaTable({
   const { assets, liabilities } = useMemo(() => {
     if (!prev || !curr) return { assets: [], liabilities: [] }
     const meta = new Map(categories.map((c) => [c.id, c]))
-    const all = computeDeltas(prev, curr).map((d) => ({
+    const all = computeDeltas(prev, curr, displayCurrency).map((d) => ({
       ...d,
       label: meta.get(d.categoryId)?.label ?? d.categoryId,
       group: meta.get(d.categoryId)?.group ?? 'alternative',
@@ -45,11 +47,11 @@ export default function DeltaTable({
       assets: all.filter((r) => !r.isLiability),
       liabilities: all.filter((r) => r.isLiability),
     }
-  }, [prev, curr, categories])
+  }, [prev, curr, categories, displayCurrency])
 
   if (!prev || !curr) return null
 
-  const base = curr.baseCurrency
+  const base = displayCurrency ?? curr.baseCurrency
   const days = daysBetween(prev.asOfDate, curr.asOfDate)
   const anyFx = assets.some((r) => Math.abs(r.fxEffect) > 0.5)
 
@@ -151,7 +153,7 @@ export default function DeltaTable({
             {debtRepaid !== 0 && (
               <tr>
                 <td className="dim small" colSpan={anyFx ? 8 : 7}>
-                  Includes {formatMoney(Math.abs(debtRepaid), base)} of debt{' '}
+                  Includes <Money amount={Math.abs(debtRepaid)} currency={base} /> of debt{' '}
                   {debtRepaid > 0 ? 'repaid' : 'taken on'}.
                 </td>
               </tr>
